@@ -1,0 +1,29 @@
+# CMake build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+compile_commands.json
+
+# Compiled Object files and Binaries
+*.o
+*.out
+*.exe
+*.dll
+*.so
+
+# Executables
+client
+server
+
+# VS Code settings (optional, but good practice)
+.vscode/
+
+# Cryptographic Keys (DO NOT COMMIT THESE)
+*.pem
+*.key
+
+# Temporary files and caches
+tmp/
+cache/
