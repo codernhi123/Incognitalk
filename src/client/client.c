@@ -19,7 +19,7 @@ char IP_str[2048] = {0};
 char log_path[2048] = {0};
 char disk_pubkey[2048] = {0};
 char disk_prikey[2048] = {0};
-unsigned char shared_secret[2048] = {0};
+unsigned char shared_seckey[2048] = {0};
 
 pthread_mutex_t thread_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -64,7 +64,7 @@ int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <Gro
     error_handle("connect in client");
   }
 
-  struct Client_MetaData client_info;
+  struct Client_Metadata client_info;
   memset(&client_info, 0, sizeof(client_info));
 
   //TODO: setting up producer part - send to server
@@ -72,7 +72,6 @@ int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <Gro
   size_t disk_prikey_len = read_all_bytes(prikey_path, disk_prikey, sizeof(disk_prikey));
 
   client_info.sfd = sfd;
-  client_info.my_client_id = -1; // will later be given by server
   client_info.group_id = group_id;
   client_info.is_hoster = is_hoster;
   client_info.state = STATE_JUST_CONNECTED; // will later be given by server
@@ -84,7 +83,7 @@ int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <Gro
   // hoster making the mutual secret key
   if (client_info.is_hoster) {
     // building the group chat's secret key
-    if (generate_symmetric_key(shared_secret) == -1) {
+    if (generate_symmetric_key(shared_seckey) == -1) {
       error_handle("generate symmetric key in client");
     }
   }
@@ -94,14 +93,42 @@ int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <Gro
     error_handle("thread in client");
   }
   
-  // consumer part - receive from server
+  // consumer part - receive from server (only for host to do key distro, or receive encrypted -> decrypt -> print/log)
   int log_fd = open(log_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
   ssize_t num_read = 0;
   uint8_t recv_buf[2048];
   int leftover_bytes = 0;
   // receive ... (working on)
+  while ((num_read = read(sfd, recv_buf + leftover_bytes, BUFF_MAX - leftover_bytes)) > 0) {
+    leftover_bytes += num_read;
+    //... extract message from server, categorize, and print decrypted message to terminal and log file
+    while (leftover_bytes >= 3) {
+      uint8_t type = recv_buf[0];
+      int16_t payload_len = 0;
+      memcpy(&payload_len, recv_buf + 1, sizeof(uint16_t));
+      payload_len = ntohs(payload_len);
 
+      int total_msg_size = 3 + payload_len;
+      if (leftover_bytes >= total_msg_size) {
+        // extract the full message
+        uint8_t *payload = recv_buf + 3;
+        //... message processor for received message from server, including decryption and verification
+        message_processor(&client_info, type, payload, payload_len);
 
-  
+        //shifting the rest to front of buffer for the next loop
+        int remaining = leftover_bytes - total_msg_size;
+        if (remaining > 0) {
+          memmove(recv_buf, recv_buf + total_msg_size, remaining);
+        }
+        leftover_bytes = remaining;
+      } else {
+        // wait for another read
+        break;
+      }
+    }
+  }
+  if (num_read == -1) {
+    error_handle("read in client");
+  }
   return 0;
 }

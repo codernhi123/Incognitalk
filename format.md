@@ -31,7 +31,7 @@ Every single packet transmitted over the TCP stream MUST begin with a 3-byte hea
 
 **Server -> Other Clients** (Broadcasting the message)
 - **Header:** `<Type 1> <Length>`
-- **Payload:** `<Sender Client ID (2 bytes)> <IV (16 bytes)> <Encrypted Ciphertext (Variable)>`
+- **Payload:** `<Sender Client ID (2 bytes)> <IV (16 bytes)> <Encrypted and Signed Ciphertext (Variable)>`
 
 ---
 
@@ -66,9 +66,9 @@ Every single packet transmitted over the TCP stream MUST begin with a 3-byte hea
 ## TYPE 4: HOST INITIALIZATION (Creating a room)
 
 **Host Client -> Server** (Request to create the room)
-- **Header:** `<Type 4> <Length: 4>`
-- **Payload:** `<Group ID (4 bytes)>`
-- *Note:* The host sends this immediately upon connection (`STATE_JUST_CONNECTED`). The server uses this 4-byte payload to instantiate the `GroupChat_Metadata` struct and register this socket as the room's Host.
+- **Header:** `<Type 4> <Length>`
+- **Payload:** `<Group ID (4 bytes)> <Public Key (Variable)>`
+- *Note:* The host sends this immediately upon connection (`STATE_JUST_CONNECTED`). The server uses this payload to instantiate the `GroupChat_Metadata` struct, register this socket as the room's Host, and store the host's public key.
 
 **Server -> Host Client** (No Response)
 - *Note:* The server does not send a confirmation message. It simply creates the room and waits for non-host clients to send Type 0 messages.

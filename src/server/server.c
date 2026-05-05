@@ -18,6 +18,7 @@ int LISTEN_BACKLOG = 0; // to be set in argument
 short CLIENTS_CNT = 0;
 
 struct GroupChat_Metadata glob_groupchats[10000]; // server keeps track of all rooms
+short GLOB_GROUPCHAT_CNT = 0;
 
 int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS> 
 {
@@ -98,7 +99,7 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
         // initate newcomer's state, NO KEY SHARING YET, only when send the first message
         newclient->groupchat_id = -1;  // -1 means "Not in a room yet", will be replaced when client send first type 0 message to server for key distro
         newclient->room = NULL;
-        memset(newclient->public_key, 0, 256);
+        memset(newclient->pubkey, 0, 256);
         newclient->state = STATE_JUST_CONNECTED;
         newclient->client_id = CLIENTS_CNT++;
         memset(newclient->recv_buf, 0, sizeof(char) * BUFF_MAX);

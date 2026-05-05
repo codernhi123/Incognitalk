@@ -33,8 +33,28 @@ size_t read_all_bytes(const char *filename, void *buffer, size_t buffer_size) {
   return file_size;
 }
 
-void *send_handle(void *arg) {
-  struct Client_MetaData *client_info = (struct Client_MetaData *)arg;
+void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *payload, int payload_len) {
+  //... categorize the message type and process accordingly, including decryption and verification
+  pthread_mutex_lock(&thread_mutex);
+    if (type == 0 && client->is_hoster) { // hoster receive type 0 msg from newcomer
+      
+      // trigger conditional variable to wake up waiting queue thread to do key distro
+      pthread_cond_signal(&cond);
+    } else if (type == 1) { // receive encrypted chat message, decrypt and print/log
+
+    } else if (type == 2) { // newcomer receive encrypted symmetric key from hoster, verify signature, decrypt and store the symmetric key for future use
+
+    } else if (type == 3) { // receive disconnect signal, do cleanup
+
+    } else {
+      perror("Unexpected message type in message processor");
+      exit(EXIT_FAILURE);
+    }
+  pthread_mutex_unlock(&thread_mutex);
+}
+
+void *send_handler(void *arg) {
+  struct Client_Metadata *client_info = (struct Client_Metadata *)arg;
   struct Universal_Send_Packet send_packet = {0};
   send_packet.group_id = client_info->group_id;
   memcpy(send_packet.pubkey, client_info->pubkey, strlen(client_info->pubkey));
@@ -42,24 +62,24 @@ void *send_handle(void *arg) {
   int8_t send_buffer[2048] = {0};
   if (client_info->is_hoster) {
     // host handshake with server
-    uint16_t net_len = htons(4);
+    send_packet.length = 4 + strlen(client_info->pubkey);
+    uint16_t net_len = htons(send_packet.length);
     uint32_t net_group_id = htonl(send_packet.group_id);
 
     send_buffer[0] = (int8_t)4; 
     memcpy(send_buffer + 1, &net_len, sizeof(uint16_t));
     memcpy(send_buffer + 3, &net_group_id, sizeof(uint32_t));
+    memcpy(send_buffer + 7, send_packet.pubkey, strlen(client_info->pubkey));
 
-    write(client_info->sfd, send_buffer, 7);
+    write(client_info->sfd, send_buffer, 3 + send_packet.length);
     
     // fire waiting queue thread
     pthread_t waiting_queue_tid;
-    if (pthread_create(&waiting_queue_tid, NULL, waiting_queue_handler, client_info) == -1) {
+    if (pthread_create(&waiting_queue_tid, NULL, waiting_queue_handler, client_info->waiting_queue_head) == -1) {
       error_handle("thread in client for waiting queue");
     }
-
   } else {
     // non host connects and send type 0 message to get in the room.
-    pthread_mutex_lock(&thread_mutex);
     if (client_info->state == STATE_JUST_CONNECTED) { //... type 0 (client -> server)
         // Payload
         
@@ -75,7 +95,6 @@ void *send_handle(void *arg) {
 
       write(client_info->sfd, send_buffer, 3 + send_packet.length);
     }
-    pthread_mutex_unlock(&thread_mutex);
   }
 
   while (1) {
@@ -113,22 +132,41 @@ void *waiting_queue_handler(void *arg) {
     
     while (waiting_queue_head != NULL) {
       //... encrypt the symmetric key with the new client's public key and send to server for key distribution
-      struct Client_Waiting_Queue *current = waiting_queue_head;
-      while (current != NULL) {
+      struct Client_Waiting_Queue *current_new_client = waiting_queue_head;
+      while (current_new_client != NULL) {
         uint8_t send_buffer[2048] = {0};
         send_buffer[0] = (int8_t)2; // type 2 for key distribution
-        uint16_t net_len = htons(PUBKEY_LEN);
-        memcpy(send_buffer + 1, &net_len, sizeof(uint16_t));
-        memcpy(send_buffer + 3, &current->new_client_id, sizeof(uint16_t));
-        // hoster now sign (using his pivate key) and encrypt the signed sec key using newcomer's pubkey
+        uint16_t net_new_client_id = htons(current_new_client->new_client_id);
+        memcpy(send_buffer + 3, &net_new_client_id, sizeof(uint16_t));
+        //... hoster now encrypt the shared_seckey using newcomer's pubkey, sign it and put both [ecrypted_shared_seckey] + [signature] in the payload (call it bundle)
         
-        // signing
-        // encrypting
-        memcpy(send_buffer + 5, signed_and_hashed_seckey, PUBKEY_LEN);
+        // encrypting seckey with newcomer's pubkey, encrypted_seckey = 256
+        unsigned char encrypted_seckey[256] = {0};
+        size_t encrypted_seckey_len = sizeof(encrypted_seckey);
+        if (rsa_encrypt_with_public_key(current_new_client->new_client_pubkey, shared_seckey, AES_KEY_LEN, encrypted_seckey, &encrypted_seckey_len) == -1) {
+          error_handle("RSA encryption in waiting queue handler");
+        }
+        // signing the symmetric key with hoster's private key, signature = 256 
+        unsigned char signature[256] = {0};
+        size_t signature_len = sizeof(signature);
+        if (rsa_sign_with_private_key(disk_prikey, encrypted_seckey, encrypted_seckey_len, signature, &signature_len) == -1) {
+          error_handle("RSA signing in waiting queue handler");
+        }
+        // putting bundle (512) and payload length to the send buffer
+        unsigned char bundle[512] = {0};
+        memcpy(bundle, encrypted_seckey, encrypted_seckey_len);
+        memcpy(bundle + encrypted_seckey_len, signature, signature_len);
+        memcpy(send_buffer + 5, bundle, encrypted_seckey_len + signature_len);
+
+        size_t Bundle_len = encrypted_seckey_len + signature_len;
+        uint16_t net_len = htons(2 + Bundle_len); // new_client_id + Bundle_len in payload
+        memcpy(send_buffer + 1, &net_len, sizeof(uint16_t));
+
+        write(current_new_client->sfd, send_buffer, 3 + 2 + Bundle_len); // send back to server for distro
         // construct the rest of the packet and send to server
-        current = current->next;
+        current_new_client = current_new_client->next;
       }
-      waiting_queue_head = current;
+      waiting_queue_head = current_new_client;
     }
     pthread_mutex_unlock(&thread_mutex);
     

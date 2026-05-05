@@ -14,8 +14,8 @@ compile_commands.json
 *.so
 
 # Executables
-client
-server
+/client
+/server
 
 # VS Code settings (optional, but good practice)
 .vscode/
@@ -27,3 +27,4 @@ server
 # Temporary files and caches
 tmp/
 cache/
+.cache/

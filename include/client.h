@@ -24,7 +24,7 @@ extern char IP_str[2048];
 extern char log_path[2048];
 extern char disk_pubkey[2048];
 extern char disk_prikey[2048];
-extern unsigned char shared_secret[2048];
+extern unsigned char shared_seckey[2048];
 
 #define PEM_BUFFER_SIZE 4096
 #define AES_KEY_LEN 32 // 256-bit AES key
@@ -48,18 +48,19 @@ typedef enum {
 } Client_State;
 
 struct Client_Waiting_Queue {
+  int sfd; //server_fd 
   uint16_t new_client_id;
   char new_client_pubkey[2048];
   struct Client_Waiting_Queue *next;
 };
 
-struct Client_MetaData {
+struct Client_Metadata {
   int sfd;
   int is_hoster; // whether this client is the hoster of the room, only hoster is responsible for key sharing
-  uint16_t my_client_id; // unique
   uint32_t group_id; // the group this client is in
   Client_State state; // for handshake procedure
   char pubkey[2048];
+  int pubkey_len;
   struct Client_Waiting_Queue *waiting_queue_head; // for hoster to keep track of clients that have sent type 0 message but haven't received the encrypted symmetric key yet
 };
 
@@ -72,6 +73,8 @@ typedef struct {
 
 size_t read_all_bytes(const char *filename, void *buffer, size_t buffer_size);
 
+void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *payload, int payload_len);
+
 void *send_handler(void *arg);
 
 void *waiting_queue_handler(void *arg);
@@ -79,3 +82,7 @@ void *waiting_queue_handler(void *arg);
 int generate_symmetric_key(unsigned char *key);
 
 int generate_rsa_keypair(RSA_Keypair *keypair);
+
+int rsa_encrypt_with_public_key(const char *public_key_pem, const unsigned char *plaintext, size_t pt_len, unsigned char *ciphertext, size_t *ct_len);
+
+int rsa_sign_with_private_key(const char *private_key_pem, const unsigned char *message, size_t msg_len, unsigned char *signature, size_t *sig_len);
