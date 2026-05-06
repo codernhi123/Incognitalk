@@ -12,12 +12,11 @@
 
 int PORT = 0;
 int BUFF_MAX = 2048;
-int MAX_CLIENTS = 10000;
-
+int MAX_CLIENTS = 100000; // = #members in a room * #room: to be set in argument 
 int LISTEN_BACKLOG = 0; // to be set in argument
 short CLIENTS_CNT = 0;
 
-struct GroupChat_Metadata glob_groupchats[10000]; // server keeps track of all rooms
+struct GroupChat_Metadata glob_groupchats[100]; // server keeps track of all rooms
 short GLOB_GROUPCHAT_CNT = 0;
 
 int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS> 
@@ -73,7 +72,7 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
     for (int i = 0; i < nfds; i++)
     {
       if (events[i].data.fd == s_fd) {
-        // 1 --- dealing with newcomers
+        // --- dealing with newcomers
         struct Client_Metadata *newclient = malloc(sizeof(struct Client_Metadata));
         memset(&newclient->addr, 0, sizeof(struct sockaddr_in6));
         newclient->fd = accept(s_fd, (struct sockaddr *)&newclient->addr, &addr_len);
@@ -96,15 +95,14 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
           exit(EXIT_FAILURE);
         }
 
-        // initate newcomer's state, NO KEY SHARING YET, only when send the first message
+        // initate newcomer's other attributes, NO KEY SHARING YET, only when send the first message
         newclient->groupchat_id = -1;  // -1 means "Not in a room yet", will be replaced when client send first type 0 message to server for key distro
         newclient->room = NULL;
-        memset(newclient->pubkey, 0, 256);
         newclient->state = STATE_JUST_CONNECTED;
         newclient->client_id = CLIENTS_CNT++;
         memset(newclient->recv_buf, 0, sizeof(char) * BUFF_MAX);
       } else {
-        // 2 --- extract and handling message
+        // --- extract and handling message
         struct Client_Metadata *client = (struct Client_Metadata *)events[i].data.ptr;
         message_handler((struct Client_Metadata *)client);
       }

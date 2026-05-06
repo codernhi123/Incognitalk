@@ -8,8 +8,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-extern pthread_mutex_t thread_mutex; // for writing to log file, shared_secret, etc. - any shared resource between threads
+extern pthread_mutex_t waiting_queue_mutex; // for writing to log file, shared_secret, etc. - any shared resource between threads
 extern pthread_cond_t cond;
+
+extern pthread_mutex_t state_mutex;
+extern pthread_cond_t state_cond;
 
 #define error_handle(msg)                                                      \
   do {                                                                         \
@@ -20,11 +23,11 @@ extern pthread_cond_t cond;
 extern int PORT;
 extern int BUFF_MAX;
 extern char IP_str[2048];
-
 extern char log_path[2048];
-extern char disk_pubkey[2048];
+
 extern char disk_prikey[2048];
 extern unsigned char shared_seckey[2048];
+extern size_t shared_seckey_len;
 
 #define PEM_BUFFER_SIZE 4096
 #define AES_KEY_LEN 32 // 256-bit AES key
@@ -47,6 +50,12 @@ typedef enum {
   STATE_DISCONNECTED // after type 3
 } Client_State;
 
+// 0.a. Struct to store pair of public-private keys as pure PEM strings
+typedef struct {
+  char public_key_pem[PEM_BUFFER_SIZE];
+  char private_key_pem[PEM_BUFFER_SIZE];
+} RSA_Keypair;
+
 struct Client_Waiting_Queue {
   int sfd; //server_fd 
   uint16_t new_client_id;
@@ -59,16 +68,12 @@ struct Client_Metadata {
   int is_hoster; // whether this client is the hoster of the room, only hoster is responsible for key sharing
   uint32_t group_id; // the group this client is in
   Client_State state; // for handshake procedure
-  char pubkey[2048];
+  RSA_Keypair keypair; // for storing the client's own keypair
   int pubkey_len;
+  int prikey_len;
   struct Client_Waiting_Queue *waiting_queue_head; // for hoster to keep track of clients that have sent type 0 message but haven't received the encrypted symmetric key yet
+  struct Client_Waiting_Queue *waiting_queue_tail; // to make it easier to add new clients to the waiting queue
 };
-
-// 0.a. Struct to store pair of public-private keys as pure PEM strings
-typedef struct {
-  char public_key_pem[PEM_BUFFER_SIZE];
-  char private_key_pem[PEM_BUFFER_SIZE];
-} RSA_Keypair;
 
 
 size_t read_all_bytes(const char *filename, void *buffer, size_t buffer_size);
@@ -86,3 +91,9 @@ int generate_rsa_keypair(RSA_Keypair *keypair);
 int rsa_encrypt_with_public_key(const char *public_key_pem, const unsigned char *plaintext, size_t pt_len, unsigned char *ciphertext, size_t *ct_len);
 
 int rsa_sign_with_private_key(const char *private_key_pem, const unsigned char *message, size_t msg_len, unsigned char *signature, size_t *sig_len);
+
+int rsa_verify_with_public_key(const char *public_key_pem, const unsigned char *message, size_t msg_len, const unsigned char *signature, size_t sig_len);
+
+int rsa_decrypt_with_private_key(const char *private_key_pem, const unsigned char *ciphertext, size_t ct_len, unsigned char *plaintext, size_t *pt_len);
+
+int aes_encrypt(const unsigned char *plaintext, int plaintext_len, const unsigned char *key, const unsigned char *iv, unsigned char *ciphertext);

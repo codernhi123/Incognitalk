@@ -16,7 +16,6 @@
 extern int PORT;
 extern int BUFF_MAX;
 extern int MAX_CLIENTS;
-
 extern int LISTEN_BACKLOG; // to be set in argument
 extern short CLIENTS_CNT;
 
@@ -30,31 +29,29 @@ typedef enum {
 } Client_State;
 
 struct Client_Metadata {
+  // --- network stack attributes
   int fd;
-  int is_hoster; // whether this client is the hoster of the room, only hoster is responsible for key sharing
-  uint16_t client_id; // unique
   struct sockaddr_in6 addr;
-  Client_State state; // for handshake procedure
-
-  int groupchat_id;
-  char pubkey[2048];
-  int pubkey_len;
+  // --- application attributes (set in handshake)
+  int is_hoster; // 1 if host, 0 if not
+  uint16_t client_id; // unique, incremental
+  Client_State state;
+  uint32_t groupchat_id;
   struct GroupChat_Metadata *room;
-
+  // --- default attributes
   uint8_t recv_buf[2048];
   int leftover_bytes;
 };
 
 struct GroupChat_Metadata {
-  int id;              // the 5-digit chat ID
+  uint32_t id;              // the 5-digit chat ID
   int is_active;        // 0 if groupchat ended, 1 if active
-
   struct Client_Metadata *host; // the first client that created the room, responsible for key sharing
-  struct Client_Metadata *members[100]; // array (or linked list) of clients in this room
+  struct Client_Metadata *members[1000]; // array (or linked list) of clients in this room
   int member_count;
 };
 
-extern struct GroupChat_Metadata glob_groupchats[10000]; // server keeps track of all rooms
+extern struct GroupChat_Metadata glob_groupchats[100]; // server keeps track of all rooms
 
 void message_handler(struct Client_Metadata *arg);
 

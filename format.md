@@ -39,13 +39,13 @@ Every single packet transmitted over the TCP stream MUST begin with a 3-byte hea
 
 **Initiator Client -> Server** (Sending the key to the newcomer)
 - **Header:** `<Type 2> <Length>`
-- **Payload:** `<Target Client ID (2 bytes)> <Encrypted Symmetric Key (Variable)>`
-- *Note:* The encrypted key is encrypted using the newcomer's public key.
+- **Payload:** `<Target Client ID (2 bytes)> <Host Public Key (Variable)> <Encrypted Symmetric Key (256 bytes)> <Signature (256 bytes)>`
+- *Note:* The host bundles their public key alongside the ciphertext and signature so the newcomer can verify the signature.
 
 **Server -> Newcomer Client** (Delivering the key)
 - **Header:** `<Type 2> <Length>`
-- **Payload:** `<Encrypted Symmetric Key (Variable)>`
-- *Note:* The server strips the Target ID and routes the ciphertext exclusively to the exact socket matching that Target ID.
+- **Payload:** `<Host Public Key (Variable)> <Encrypted Symmetric Key (256 bytes)> <Signature (256 bytes)>`
+- *Note:* The server strips the Target ID and routes the bundle exclusively to the exact socket matching that Target ID. The newcomer verifies the signature using the included host's public key before decrypting.
 
 ---
 
@@ -66,9 +66,11 @@ Every single packet transmitted over the TCP stream MUST begin with a 3-byte hea
 ## TYPE 4: HOST INITIALIZATION (Creating a room)
 
 **Host Client -> Server** (Request to create the room)
-- **Header:** `<Type 4> <Length>`
-- **Payload:** `<Group ID (4 bytes)> <Public Key (Variable)>`
-- *Note:* The host sends this immediately upon connection (`STATE_JUST_CONNECTED`). The server uses this payload to instantiate the `GroupChat_Metadata` struct, register this socket as the room's Host, and store the host's public key.
+- **Header:** `<Type 4> <Length: 0>`
+- **Payload:** `[Empty]`
+- *Note:* The host sends this immediately upon connection (`STATE_JUST_CONNECTED`) to request a new room.
 
-**Server -> Host Client** (No Response)
-- *Note:* The server does not send a confirmation message. It simply creates the room and waits for non-host clients to send Type 0 messages.
+**Server -> Host Client** (Room created confirmation)
+- **Header:** `<Type 4> <Length: 4>`
+- **Payload:** `<Group ID (4 bytes)>`
+- *Note:* The server creates the `GroupChat_Metadata` struct, assigns the room a unique Group ID, and returns it to the host. The host can then share this ID with others.
