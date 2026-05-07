@@ -56,11 +56,30 @@ void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pa
         client->waiting_queue_tail->next = new_client;
       }
       client->waiting_queue_tail = new_client;
-    pthread_mutex_unlock(&waiting_queue_mutex);
+      non_hoster_count++; // new_client
     // trigger conditional variable to wake up waiting queue thread to do key distro
     pthread_cond_signal(&cond);
+    pthread_mutex_unlock(&waiting_queue_mutex);
   } else if (type == 1) { // receive encrypted chat message, decrypt and print/log
-
+    if (client->state != STATE_IN_ROOM) {
+      error_handle("Received chat message while not in room, unexpected behavior");
+    }
+    //... extract the sender's client_id, iv and ciphertext from the payload, decrypt the message with the symmetric key, print decrypted message to terminal and log file
+    uint16_t net_sender_id = 0;
+    memcpy(&net_sender_id, payload, sizeof(uint16_t));
+    uint16_t sender_id = ntohs(net_sender_id);
+    unsigned char iv[16] = {0};
+    memcpy(iv, payload + 2, 16);
+    unsigned char ciphertext[2048] = {0};
+    memcpy(ciphertext, payload + 18, payload_len - 18);
+    unsigned char decrypted_message[2048] = {0};
+    int decrypted_len = aes_decrypt(ciphertext, payload_len - 18, shared_seckey, iv, decrypted_message);
+    if (decrypted_len < 0) {
+      error_handle("AES decryption failed in message processor");
+    }
+    decrypted_message[decrypted_len] = '\0';
+    printf("Client %d: %s\n", sender_id, decrypted_message);
+    dprintf(log_fd, "Client %d: %s\n", sender_id, decrypted_message);
   } else if (type == 2 && client->is_hoster == 0) { // newcomer receive encrypted symmetric key from hoster, verify signature, decrypt and store the symmetric key for future use
     //a. verify the signature with hoster's pubkey
     char host_pubkey[2048] = {0};
@@ -82,8 +101,18 @@ void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pa
     client->state = STATE_IN_ROOM;
     pthread_cond_signal(&state_cond);
     pthread_mutex_unlock(&state_mutex);
-  } else if (type == 3) { // receive disconnect signal, do cleanup
-
+  } else if (type == 3) { // receive disconnect announcement, print the announcement
+    if (client->is_hoster) {
+      pthread_mutex_lock(&waiting_queue_mutex);
+      non_hoster_count--; // decrement the count when a non-hoster disconnects
+      pthread_cond_signal(&cond);
+      pthread_mutex_unlock(&waiting_queue_mutex);
+    }
+    uint16_t net_client_id = 0;
+    memcpy(&net_client_id, payload, sizeof(uint16_t));
+    uint16_t client_id = ntohs(net_client_id);
+    printf("Client %d has left the room.\n", client_id);
+    dprintf(log_fd, "Client %d has left the room.\n", client_id);
   } else if (type == 4 && client->is_hoster) { // receive the assigned groupchat_id from server after hoster send type 4 message to server for room creation
     //... extract the assigned groupchat_id from the payload and update the client's state
     uint32_t net_group_id = 0;
@@ -149,14 +178,32 @@ void *send_handler(void *arg) {
   while (1) {
     int8_t send_buffer[2048] = {0};
     if (client_info->state == STATE_IN_ROOM) {
-      //... type 1
-      send_buffer[0] = (int8_t)1;
+      //... type 1, if detects "/exit" in user input, then send type 3 instead and break the loop + cleaning up
       char chat_input[1024] = {0};
       if (fgets(chat_input, sizeof(chat_input), stdin)) {
         chat_input[strcspn(chat_input, "\n")] = 0;
         int pt_len = strlen(chat_input);
 
         if (pt_len > 0) {
+          if (strcmp(chat_input, "/exit") == 0) { // type 3 message
+            if (client_info->is_hoster) {
+              // if the hoster exits, everyone else must have exited
+              if (non_hoster_count > 0) {
+                printf("Cannot exit room yet, everyone has to leave first, try again later\n");
+                continue;
+              }
+            }
+            send_buffer[0] = (int8_t)3;
+            uint16_t net_len = htons(0);
+            memcpy(send_buffer + 1, &net_len, sizeof(uint16_t));
+            write(client_info->sfd, send_buffer, 3);
+            pthread_mutex_lock(&state_mutex);
+            client_info->state = STATE_DISCONNECTED;
+            pthread_cond_signal(&state_cond);
+            pthread_mutex_unlock(&state_mutex);
+            break;
+          } else { // type 1 message
+            send_buffer[0] = (int8_t)1;
             unsigned char iv[16];
             if (RAND_bytes(iv, sizeof(iv)) != 1) {
                 error_handle("Failed to generate IV");
@@ -178,19 +225,13 @@ void *send_handler(void *arg) {
 
             // send to Server (Total bytes = 3 byte header + Payload)
             write(client_info->sfd, send_buffer, 3 + payload_len);
+          }
         }
       }
-    } else if (client_info->state == STATE_DISCONNECTED) {
-      //... disconnect
-      send_buffer[0] = (int8_t)3;
     } else {
-      //... unexpected behavior
       error_handle("Unexpected behavior in send handler");
     }
-  
-    //... construct the packet according to the Global Framing Rule and send to server  
   }
-  
   return NULL;
 }
 

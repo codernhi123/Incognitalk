@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -120,9 +121,47 @@ void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pa
     }
   } else if (client->state == STATE_IN_ROOM) { // host does seckey distro or clients do chat
     if (type == 1) {
-      //... decrypt the message with symmetric key and send to other clients in the same room
+      //... transfer the encrypted message to all other clients in the same room, no need to decrypt or verify signature at server side, just forward the ciphertext + iv + sender's pubkey for receiver to do decryption and verification
+      struct GroupChat_Metadata *room = client->room;
+      for (int i = 0; i < room->member_count; i++) {
+        if (room->members[i]->client_id != client->client_id && room->members[i]->state == STATE_IN_ROOM) {
+          uint8_t forward_buf[2048] = {0};
+          forward_buf[0] = (uint8_t)1;
+          uint16_t net_len = htons(payload_len);
+          uint16_t net_sender_id = htons(client->client_id);
+          memcpy(forward_buf + 1, &net_len, sizeof(uint16_t));
+          memcpy(forward_buf + 3, &net_sender_id, sizeof(uint16_t));
+          memcpy(forward_buf + 5, payload, payload_len); // iv + ciphertext
+          write(room->members[i]->fd, forward_buf, 3 + payload_len);
+        }
+      }
     } else if (type == 3) {
-      //... trigger disconnect procedure, if host leaves, end the room and notify all clients in the room
+      //... trigger disconnect procedure, if non-host leaves, notify all clients in the room, else, just end the room cuz no one left
+      struct GroupChat_Metadata *room = client->room;
+      if (client->is_hoster == 0) {
+        for (int i = 0; i < room->member_count; i++) {
+          if (room->members[i]->client_id != client->client_id && room->members[i]->state == STATE_IN_ROOM) {
+            uint8_t forward_buf[2048] = {0};
+            forward_buf[0] = (uint8_t)3;
+            uint16_t net_len = htons(2);
+            memcpy(forward_buf + 1, &net_len, sizeof(uint16_t));
+            uint16_t net_sender_id = htons(client->client_id);
+            memcpy(forward_buf + 3, &net_sender_id, sizeof(uint16_t));
+            write(room->members[i]->fd, forward_buf, 5);
+          }
+        }
+        client->state = STATE_DISCONNECTED;
+      } else {
+        room->is_active = 0;
+        for (int i = 0; i < room->member_count; i++) {
+          if (room->members[i]->state == STATE_IN_ROOM) {
+            room->members[i]->state = STATE_DISCONNECTED;
+          }
+        }
+      }
+      close(client->fd);
+      free(client);
+      client = NULL;
     } else if (type == 2 && client->is_hoster) {
       //... hoster send to server the bundle, now server have to forward that to the corresponding new client + change state of new client
       uint16_t new_client_id = 0;

@@ -54,7 +54,7 @@ Every single packet transmitted over the TCP stream MUST begin with a 3-byte hea
 **Client -> Server** (Intent to leave)
 - **Header:** `<Type 3> <Length: 0>`
 - **Payload:** `[Empty]`
-- *Note:* The server receives this, removes the client from the room struct, and calls `close()`.
+- *Note:* The server receives this, make announcement, removes the client from the room struct, and calls `close()`.
 
 **Server -> Other Clients** (Notification of departure)
 - **Header:** `<Type 3> <Length: 2>`

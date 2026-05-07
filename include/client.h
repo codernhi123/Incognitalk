@@ -24,6 +24,9 @@ extern int PORT;
 extern int BUFF_MAX;
 extern char IP_str[2048];
 extern char log_path[2048];
+extern int log_fd;
+
+extern int non_hoster_count; // possesed only by host, when host get a type 0 message then increment, when host get a type 3 message then decrement, host can only exit when non_hoster_count is 0
 
 extern char disk_prikey[2048];
 extern unsigned char shared_seckey[2048];
@@ -97,3 +100,5 @@ int rsa_verify_with_public_key(const char *public_key_pem, const unsigned char *
 int rsa_decrypt_with_private_key(const char *private_key_pem, const unsigned char *ciphertext, size_t ct_len, unsigned char *plaintext, size_t *pt_len);
 
 int aes_encrypt(const unsigned char *plaintext, int plaintext_len, const unsigned char *key, const unsigned char *iv, unsigned char *ciphertext);
+
+int aes_decrypt(const unsigned char *ciphertext, int ciphertext_len, const unsigned char *key, const unsigned char *iv, unsigned char *plaintext);

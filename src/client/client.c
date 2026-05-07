@@ -35,6 +35,9 @@ int PORT = 0;
 int BUFF_MAX = 2048; // assume all full messages (header + payload) can fit in 2048 bytes, so that we can read the full message in one read call, and avoid dealing with fragmentation and reassembly for now
 char IP_str[2048] = {0};
 char log_path[2048] = {0};
+int log_fd = 0;
+
+int non_hoster_count = INT_MIN;
 
 char disk_prikey[2048] = {0};
 unsigned char shared_seckey[2048] = {0};
@@ -93,6 +96,7 @@ int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <Gro
       error_handle("generate symmetric key in client");
     }
     shared_seckey_len = 32;
+    non_hoster_count = 0; // initialize the non_hoster_count for host
   }
   
   pthread_t send_tid;
@@ -101,7 +105,7 @@ int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <Gro
   }
   
   // --- consumer part - receive from server (only for host to do key distro, or receive encrypted -> decrypt/verify -> print/log)
-  int log_fd = open(log_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+  log_fd = open(log_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
   ssize_t num_read = 0;
   uint8_t recv_buf[2048];
   int leftover_bytes = 0;
