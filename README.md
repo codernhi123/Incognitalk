@@ -92,7 +92,7 @@ cd build
 
 ### 1. High-Level Architecture
 
-<img src="./img/ArchitectDiagram.png" width="50%"/>
+<img src="./img/ArchitectDiagram.png" width="100%"/>
 
 The system has two binaries: `server` and `client`. The server is a **single-threaded `epoll` event loop** that routes encrypted frames between clients — it never decrypts anything. Each client runs a **two-thread Producer-Consumer model**: one thread drives the `epoll` network loop, the other reads stdin and sends messages.
 
