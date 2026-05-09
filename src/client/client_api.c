@@ -1,3 +1,13 @@
+/****************************************************************************************************************
+#################################################################################################################
+  Authors: Viet Huy (Finnick) Pham, a.k.a Fintanyl
+  Date: 2026-05-08
+  Permission: All rights reserved. No commercial use. For educational use only. Citation required when reference.
+  Author's messages to readers: Be kind, happy coding and pet some tabby cats!
+  Suggesstion or contact is always welcome and appreciated, reach out to me via email: pvhuy060606@gmail.com
+#################################################################################################################
+****************************************************************************************************************/
+
 #include <sys/types.h>
 #include <openssl/rand.h>
 #include "client.h"
@@ -40,12 +50,19 @@ size_t read_all_bytes(const char *filename, void *buffer, size_t buffer_size) {
 void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *payload, int payload_len) {
   //... categorize the message type and process accordingly, including decryption and verification
   if (type == 0 && client->is_hoster) { // hoster receive type 0 msg from newcomer
+    pthread_mutex_lock(&state_mutex);
+    if (client->state != STATE_IN_ROOM) {
+        pthread_mutex_unlock(&state_mutex);
+        return;
+    }
+    // host still has not left, can be added for key distro
     pthread_mutex_lock(&waiting_queue_mutex);
       struct Client_Waiting_Queue *new_client = (struct Client_Waiting_Queue *)malloc(sizeof(struct Client_Waiting_Queue));
       new_client->sfd = client->sfd;
       uint16_t net_client_id = 0;
       memcpy(&net_client_id, payload, sizeof(uint16_t));
       new_client->new_client_id = ntohs(net_client_id);
+      memset(new_client->new_client_pubkey, 0, 2048);
       memcpy(new_client->new_client_pubkey, payload + 2, payload_len - 2);
       new_client->next = NULL;
 
@@ -60,8 +77,12 @@ void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pa
     // trigger conditional variable to wake up waiting queue thread to do key distro
     pthread_cond_signal(&cond);
     pthread_mutex_unlock(&waiting_queue_mutex);
+    pthread_mutex_unlock(&state_mutex);
   } else if (type == 1) { // receive encrypted chat message, decrypt and print/log
-    if (client->state != STATE_IN_ROOM) {
+    pthread_mutex_lock(&state_mutex);
+    Client_State current_state = client->state;
+    pthread_mutex_unlock(&state_mutex);
+    if (current_state != STATE_IN_ROOM) {
       error_handle("Received chat message while not in room, unexpected behavior");
     }
     //... extract the sender's client_id, iv and ciphertext from the payload, decrypt the message with the symmetric key, print decrypted message to terminal and log file
@@ -75,7 +96,9 @@ void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pa
     unsigned char decrypted_message[2048] = {0};
     int decrypted_len = aes_decrypt(ciphertext, payload_len - 18, shared_seckey, iv, decrypted_message);
     if (decrypted_len < 0) {
-      error_handle("AES decryption failed in message processor");
+      char err[512];
+      snprintf(err, sizeof(err), "AES decryption failed in message processor, len=%d", payload_len);
+      error_handle(err);
     }
     decrypted_message[decrypted_len] = '\0';
     printf("Client %d: %s\n", sender_id, decrypted_message);
@@ -93,9 +116,11 @@ void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pa
       error_handle("Verification failed in message processor, beware of potential MITM attack");
     }
     //b. decrypt the symmetric key with newcomer's private key
-    if (rsa_decrypt_with_private_key(client->keypair.private_key_pem, encrypted_seckey, 256, shared_seckey, &shared_seckey_len) == -1) {
+    size_t out_len = 2048;
+    if (rsa_decrypt_with_private_key(client->keypair.private_key_pem, encrypted_seckey, 256, shared_seckey, &out_len) == -1) {
       error_handle("Decryption failed in message processor");
     }
+    shared_seckey_len = out_len;
     //c. update client's state to IN_ROOM, now the client can send type 1 or 3 messages to server
     pthread_mutex_lock(&state_mutex);
     client->state = STATE_IN_ROOM;
@@ -124,7 +149,9 @@ void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pa
     pthread_cond_signal(&state_cond);
     pthread_mutex_unlock(&state_mutex);
   } else {
-    error_handle("Unexpected message type in message processor");
+    char err[256];
+    snprintf(err, sizeof(err), "Unexpected message type %d in message processor", type);
+    error_handle(err);
   }
 }
 
@@ -141,7 +168,9 @@ void *send_handler(void *arg) {
     uint16_t net_len = htons(0);
     memcpy(send_buffer + 1, &net_len, sizeof(uint16_t));
 
+    pthread_mutex_lock(&socket_mutex);
     write(client_info->sfd, send_buffer, 3);
+    pthread_mutex_unlock(&socket_mutex);
     
     // Note: we can fire the waiting queue thread here, but we don't know the room ID yet.
     // The message_processor will handle the TYPE 4 response and print the Room ID to the terminal for the host.
@@ -164,7 +193,9 @@ void *send_handler(void *arg) {
       memcpy(send_buffer + 3, &net_group_id, sizeof(uint32_t));
       memcpy(send_buffer + 7, send_packet.pubkey, client_info->pubkey_len);
 
+      pthread_mutex_lock(&socket_mutex);
       write(client_info->sfd, send_buffer, 3 + send_packet.length);
+      pthread_mutex_unlock(&socket_mutex);
     }
   }
 
@@ -177,7 +208,10 @@ void *send_handler(void *arg) {
 
   while (1) {
     int8_t send_buffer[2048] = {0};
-    if (client_info->state == STATE_IN_ROOM) {
+    pthread_mutex_lock(&state_mutex);
+    Client_State current_state = client_info->state;
+    pthread_mutex_unlock(&state_mutex);
+    if (current_state == STATE_IN_ROOM) {
       //... type 1, if detects "/exit" in user input, then send type 3 instead and break the loop + cleaning up
       char chat_input[1024] = {0};
       if (fgets(chat_input, sizeof(chat_input), stdin)) {
@@ -186,21 +220,27 @@ void *send_handler(void *arg) {
 
         if (pt_len > 0) {
           if (strcmp(chat_input, "/exit") == 0) { // type 3 message
+            pthread_mutex_lock(&state_mutex);
+            pthread_mutex_lock(&waiting_queue_mutex);
             if (client_info->is_hoster) {
               // if the hoster exits, everyone else must have exited
               if (non_hoster_count > 0) {
                 printf("Cannot exit room yet, everyone has to leave first, try again later\n");
+                pthread_mutex_unlock(&waiting_queue_mutex);
+                pthread_mutex_unlock(&state_mutex);
                 continue;
               }
             }
+            client_info->state = STATE_DISCONNECTED;
+            //pthread_cond_signal(&state_cond);
+            pthread_mutex_unlock(&waiting_queue_mutex);
+            pthread_mutex_unlock(&state_mutex);
             send_buffer[0] = (int8_t)3;
             uint16_t net_len = htons(0);
             memcpy(send_buffer + 1, &net_len, sizeof(uint16_t));
+            pthread_mutex_lock(&socket_mutex);
             write(client_info->sfd, send_buffer, 3);
-            pthread_mutex_lock(&state_mutex);
-            client_info->state = STATE_DISCONNECTED;
-            pthread_cond_signal(&state_cond);
-            pthread_mutex_unlock(&state_mutex);
+            pthread_mutex_unlock(&socket_mutex);
             break;
           } else { // type 1 message
             send_buffer[0] = (int8_t)1;
@@ -224,7 +264,9 @@ void *send_handler(void *arg) {
             memcpy(send_buffer + 19, ciphertext, ct_len);
 
             // send to Server (Total bytes = 3 byte header + Payload)
+            pthread_mutex_lock(&socket_mutex);
             write(client_info->sfd, send_buffer, 3 + payload_len);
+            pthread_mutex_unlock(&socket_mutex);
           }
         }
       }
@@ -282,7 +324,9 @@ void *waiting_queue_handler(void *arg) {
       memcpy(send_buffer + 5 + host_pubkey_len, encrypted_seckey, encrypted_seckey_len);
       memcpy(send_buffer + 5 + host_pubkey_len + encrypted_seckey_len, signature, signature_len);
 
+      pthread_mutex_lock(&socket_mutex);
       write(processing_queue->sfd, send_buffer, 3 + payload_len); // send back to server for distro
+      pthread_mutex_unlock(&socket_mutex);
 
       // move to next & free current client
       struct Client_Waiting_Queue *temp = processing_queue;

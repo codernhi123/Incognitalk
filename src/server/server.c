@@ -1,3 +1,13 @@
+/****************************************************************************************************************
+#################################################################################################################
+  Authors: Viet Huy (Finnick) Pham, a.k.a Fintanyl
+  Date: 2026-05-08
+  Permission: All rights reserved. No commercial use. For educational use only. Citation required when reference.
+  Author's messages to readers: Be kind, happy coding and pet some tabby cats!
+  Suggesstion or contact is always welcome and appreciated, reach out to me via email: pvhuy060606@gmail.com
+#################################################################################################################
+****************************************************************************************************************/
+
 #include "server.h"
 #include <arpa/inet.h>
 #include <pthread.h>
@@ -39,6 +49,12 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
   s_fd = socket(AF_INET6, SOCK_STREAM, 0);
   if (s_fd == -1) {
     error_handle("server socket issue");
+  }
+
+  // set SO_REUSEADDR to avoid "Address already in use" error when restarting server
+  int opt = 1;
+  if (setsockopt(s_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+    error_handle("setsockopt SO_REUSEADDR issue");
   }
 
   if (bind(s_fd, (struct sockaddr *)&s_addr, sizeof(struct sockaddr_in6)) == -1) {
@@ -101,6 +117,7 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
         newclient->state = STATE_JUST_CONNECTED;
         newclient->client_id = CLIENTS_CNT++;
         memset(newclient->recv_buf, 0, sizeof(char) * BUFF_MAX);
+        newclient->leftover_bytes = 0;
       } else {
         // --- extract and handling message
         struct Client_Metadata *client = (struct Client_Metadata *)events[i].data.ptr;
@@ -109,5 +126,6 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
     }
   }
   //..clean up
+  close(s_fd);
   return 0;
 }

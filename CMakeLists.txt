@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project (
-  SocketProgramming
+  E2EEGroupChat
   VERSION 1.0
   DESCRIPTION "Making groupchat"
   LANGUAGES C
@@ -18,3 +18,5 @@ add_executable(client ${CLIENT_SOURCES})
 
 find_package(OpenSSL REQUIRED)
 target_link_libraries(client OpenSSL::Crypto)
+
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -g")

@@ -1,3 +1,13 @@
+/****************************************************************************************************************
+#################################################################################################################
+  Authors: Viet Huy (Finnick) Pham, a.k.a Fintanyl
+  Date: 2026-05-08
+  Permission: All rights reserved. No commercial use. For educational use only. Citation required when reference.
+  Author's messages to readers: Be kind, happy coding and pet some tabby cats!
+  Suggesstion or contact is always welcome and appreciated, reach out to me via email: pvhuy060606@gmail.com
+#################################################################################################################
+****************************************************************************************************************/
+
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <netinet/in.h>
@@ -38,6 +48,7 @@ struct Client_Metadata {
   Client_State state;
   uint32_t groupchat_id;
   struct GroupChat_Metadata *room;
+  uint16_t room_idx;
   // --- default attributes
   uint8_t recv_buf[2048];
   int leftover_bytes;
@@ -55,4 +66,4 @@ extern struct GroupChat_Metadata glob_groupchats[100]; // server keeps track of 
 
 void message_handler(struct Client_Metadata *arg);
 
-void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *payload, int payload_len);
+int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *payload, int payload_len);

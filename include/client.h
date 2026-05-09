@@ -1,3 +1,13 @@
+/****************************************************************************************************************
+#################################################################################################################
+  Authors: Viet Huy (Finnick) Pham, a.k.a Fintanyl
+  Date: 2026-05-08
+  Permission: All rights reserved. No commercial use. For educational use only. Citation required when reference.
+  Author's messages to readers: Be kind, happy coding and pet some tabby cats!
+  Suggesstion or contact is always welcome and appreciated, reach out to me via email: pvhuy060606@gmail.com
+#################################################################################################################
+****************************************************************************************************************/
+
 #include <sys/types.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -13,6 +23,8 @@ extern pthread_cond_t cond;
 
 extern pthread_mutex_t state_mutex;
 extern pthread_cond_t state_cond;
+
+extern pthread_mutex_t socket_mutex; // for writing to the socket, to avoid interleaving of messages from different threads
 
 #define error_handle(msg)                                                      \
   do {                                                                         \

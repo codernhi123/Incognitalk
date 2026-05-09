@@ -1,3 +1,13 @@
+/****************************************************************************************************************
+#################################################################################################################
+  Authors: Viet Huy (Finnick) Pham, a.k.a Fintanyl
+  Date: 2026-05-08
+  Permission: All rights reserved. No commercial use. For educational use only. Citation required when reference.
+  Author's messages to readers: Be kind, happy coding and pet some tabby cats!
+  Suggesstion or contact is always welcome and appreciated, reach out to me via email: pvhuy060606@gmail.com
+#################################################################################################################
+****************************************************************************************************************/
+
 #include <openssl/types.h>
 #include <netinet/in.h>
 #include "client.h"
@@ -11,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <signal.h>
 
 /*
 Intended workflow:
@@ -22,9 +33,9 @@ Intended workflow:
 4. Host A adds client B to the waiting queue for key distribution, and trigger the waiting queue handler thread to do the key distribution: encrypt the shared symmetric key with client B's public key, sign it with host A's private key, and send both the encrypted symmetric key and signature in a bundle to server with type 2 message. (done)
 5. Server forwards the bundle to client B with type 2 message. (done)
 6. Client B verifies the signature with host A's public key, decrypts the symmetric key with its private key, and store the symmetric key for future use. (done)
-7. Client B can now send encrypted messages to server with type 1 message, and server will forward the encrypted message to all other clients in the same room, and those clients will decrypt with the shared symmetric key and print/log the plaintext message.
-8. If any client wants to leave, it sends a type 3 message to server, and server will do the cleanup, if the host leaves, server will end the room, assume the host leaves the last.
-
+7. Client B can now send encrypted messages to server with type 1 message, and server will forward the encrypted message to all other clients in the same room, and those clients will decrypt with the shared symmetric key and print/log the plaintext message. (done)
+8. If any client wants to leave, it sends a type 3 message to server, and server will do the cleanup, if the host leaves, server will end the room, assume the host leaves the last. (done)
+All done yay!
 Concurrency issue (where mutex needed):
 1. All attributes in client code are read-only and/or set 1 time before enter any threads, except for the state and waiting queue for host, so we need mutex when accessing/updating those attributes.
 2. For the waiting queue, since it's only modified by the host and only accessed by the waiting queue handler thread, we can use a simple mutex to protect it, and a condition variable to signal the waiting queue handler thread when there's a new client in the waiting queue, to avoid busy waiting
@@ -46,8 +57,15 @@ size_t shared_seckey_len = 32;
 pthread_mutex_t waiting_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
+pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t state_cond = PTHREAD_COND_INITIALIZER;
+
+pthread_mutex_t socket_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <GroupID> <log_path> 
   // -- Using Producer-Consumer pattern for client, i.e two threads for sending and receiving
+  signal(SIGPIPE, SIG_IGN);
+
   if (argc != 6) {
     error_handle("CLI argument client");
   }
@@ -68,10 +86,21 @@ int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <Gro
   addr.sin6_family = AF_INET6;
   addr.sin6_port = htons(PORT);
   if (inet_pton(AF_INET6, IP_str, &addr.sin6_addr) <= 0) {
-    error_handle("inet_pton in client");
+    // If IPv6 fails, maybe it's an IPv4 address string like "127.0.0.1"
+    struct in_addr addr4;
+    if (inet_pton(AF_INET, IP_str, &addr4) > 0) {
+      // convert to IPv4-mapped IPv6 address: ::ffff:w.x.y.z
+      char ipv4_mapped[2048];
+      snprintf(ipv4_mapped, sizeof(ipv4_mapped), "::ffff:%s", IP_str);
+      if (inet_pton(AF_INET6, ipv4_mapped, &addr.sin6_addr) <= 0) {
+        error_handle("inet_pton mapped IPv4 failed");
+      }
+    } else {
+      error_handle("inet_pton in client (invalid IP format)");
+    }
   }
 
-  if (connect(sfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_in)) == -1) {
+  if (connect(sfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_in6)) == -1) {
     error_handle("connect in client");
   }
 
@@ -141,5 +170,5 @@ int main(int argc, char *argv[]) { // ./client <IP> <PORT> <Hoster_Boolean> <Gro
   if (num_read == -1) {
     error_handle("read in client");
   }
-  return 0;
+  exit(0);
 }

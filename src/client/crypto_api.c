@@ -1,3 +1,18 @@
+/****************************************************************************************************************
+#################################################################################################################
+  Authors: Viet Huy (Finnick) Pham, a.k.a Fintanyl
+  Date: 2026-05-08
+  Permission: All rights reserved. No commercial use. For educational use only. Citation required when reference.
+  Author's messages to readers: Be kind, happy coding and pet some tabby cats!
+  Suggesstion or contact is always welcome and appreciated, reach out to me via email: pvhuy060606@gmail.com
+
+  Disclaimer: ***  
+  This file (mostly boiletplate) is mostly supported and created by the assistance of Gemini 3.1 Pro. 
+  However, the main pipeline and design has been composed and architected by the author.
+  Hence the author takes the full responsibility for any potential security issue, bug, or vulnerability in this part.
+#################################################################################################################
+****************************************************************************************************************/
+
 #include "client.h"
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -105,14 +120,16 @@ int aes_encrypt(const unsigned char *plaintext, int plaintext_len, const unsigne
   int ciphertext_len;
 
   if(!(ctx = EVP_CIPHER_CTX_new())) return -1;
-  if(1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv)) return -1;
-  if(1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len)) return -1;
+  int ret = -1;
+  if(EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) goto err;
+  if(EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len) != 1) goto err;
   ciphertext_len = len;
-  if(1 != EVP_EncryptFinal_ex(ctx, ciphertext + len, &len)) return -1;
+  if(EVP_EncryptFinal_ex(ctx, ciphertext + len, &len) != 1) goto err;
   ciphertext_len += len;
-
+  ret = ciphertext_len;
+err:
   EVP_CIPHER_CTX_free(ctx);
-  return ciphertext_len;
+  return ret;
 }
 
 // 5b. Decrypt using AES symmetric key (AES-256-CBC)
@@ -122,14 +139,16 @@ int aes_decrypt(const unsigned char *ciphertext, int ciphertext_len, const unsig
   int plaintext_len;
 
   if(!(ctx = EVP_CIPHER_CTX_new())) return -1;
-  if(1 != EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv)) return -1;
-  if(1 != EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len)) return -1;
+  int ret = -1;
+  if(EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) goto err;
+  if(EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len) != 1) goto err;
   plaintext_len = len;
-  if(1 != EVP_DecryptFinal_ex(ctx, plaintext + len, &len)) return -1;
+  if(EVP_DecryptFinal_ex(ctx, plaintext + len, &len) != 1) goto err;
   plaintext_len += len;
-
+  ret = plaintext_len;
+err:
   EVP_CIPHER_CTX_free(ctx);
-  return plaintext_len;
+  return ret;
 }
 
 // 6. Sign data (e.g., the encrypted symmetric key) using the host's PRIVATE key
