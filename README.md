@@ -1,12 +1,13 @@
 # E2EE TCP IPv6 Group Chat — C / POSIX / OpenSSL
 
 > A high-performance, End-to-End Encrypted group chat application built from scratch in C, using raw POSIX sockets, `epoll`, `pthreads`, and OpenSSL — with a custom binary TLV protocol over IPv6 TCP.
+>
+> **v1.1:** Server upgraded from single-threaded `epoll` to a hybrid `epoll` + bounded thread pool architecture for multi-core parallelism.
 
 ---
 
 ## Table of Contents
 
-- [Updates](#-update)
 - [Objective](#-objective)
 - [Tech Stack](#-tech-stack)
 - [Getting Started](#-getting-started)
@@ -17,18 +18,13 @@
 
 ---
 
-## Update (v1.1)
-
-*Working on a major update for the server, upgrading from single core E-poll handling to a hybrid Epoll triggering a bounded dynamic set of threadpool for minimizing context-switch and maximizing multi-cores throughput.*
-
----
-
 ## Objective
 
 Build a **group chat system** where:
 - Multiple clients can create or join named rooms over **IPv6 TCP**
 - All chat messages are **end-to-end encrypted** — the server never sees plaintext
 - The system is resilient to **fd-recycling (ABA)** bugs and handles **partial TCP reads** correctly via a strict binary framing protocol
+- The system is processed **concurrently** in **parrallel CPU cores**, optimizing CPU utilization to achieve **high throughputs**.
 - The entire stack — networking, concurrency, and cryptography — is implemented using **low-level POSIX and OpenSSL APIs**, with no high-level frameworks
 
 ---
@@ -101,9 +97,9 @@ cd build
 
 ### 1. High-Level Architecture
 
-<img src="./img/ArchitectDiagram.png" width="100%"/>
+<img src="./img/ArchitectureDiagramV1.1.png" width="100%"/>
 
-The system has two binaries: `server` and `client`. The server is a **single-threaded `epoll` event loop** that routes encrypted frames between clients — it never decrypts anything. Each client runs a **two-thread Producer-Consumer model**: one thread drives the `epoll` network loop, the other reads stdin and sends messages.
+The system has two binaries: `server` and `client`. The server runs a **hybrid `epoll` + thread pool** architecture — the main thread is a dedicated event-loop that accepts connections and detects readable sockets, then delegates all message processing to a pool of worker threads. Each client runs a **two-thread Producer-Consumer model**: one thread drives the `epoll` network loop, the other reads stdin and sends messages.
 
 ---
 
@@ -164,17 +160,27 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 
 ## Implementation Details
 
-### Server: `epoll` + ABA-Safe Client IDs
+### Server: `epoll` + Thread Pool + ABA-Safe Client IDs (v1.1)
+ 
+**Architecture overview — two layers:**
+ 
+- **Main thread (event loop):** Runs `epoll_wait` in a tight loop. It handles only two responsibilities: accepting new connections and detecting which existing clients have data ready to read. When a client socket becomes readable, the main thread pushes the client's `Client_Metadata*` pointer into a circular task queue and posts a semaphore — then immediately goes back to `epoll_wait`. It does zero message processing itself.
+- **Worker thread pool:** `sysconf(_SC_NPROCESSORS_ONLN)` threads are spawned at startup, each blocking on `sem_wait`. When woken, a worker pulls one `Client_Metadata*` from the circular task queue (protected by a `pthread_mutex`) and calls `message_processor()` to handle all state transitions, frame parsing, and message forwarding for that client.
+**Key design decisions extracted from the code:**
+ 
+- **`EPOLLONESHOT`:** Every client fd is registered with `EPOLLONESHOT`. Once `epoll` fires for a client, it is automatically disarmed — no other thread can be woken for the same fd concurrently. After the worker finishes processing, it re-arms the fd via `epoll_ctl(EPOLL_CTL_MOD)`. This eliminates the need for per-socket read locks between worker threads.
+- **Read quota (`READ_QUOTA = 8192`):** Each worker reads at most 8 192 bytes per dispatch cycle. If a client sends a burst larger than the quota, the remainder is handled in the next `epoll` firing — preventing one chatty client from starving others in the queue. This ensures fair-treatment (adapted from Round-robin Scheduling) to all waiting tasks.
+- **Circular task queue (size 100 000):** A fixed-size ring buffer stores `Client_Metadata*` pointers. The main thread writes at `queue_rear`; workers consume from `queue_front`. Both ends are protected by a single `pthread_mutex`. If the queue fills (overflow guard), the server aborts rather than silently dropping events.
+- **ABA-safe client IDs:** Each accepted connection is assigned a unique `uint16_t client_id` (monotonically incrementing `CLIENTS_CNT`). The `Client_Metadata*` pointer lives in `epoll_event.data.ptr` for O(1) dispatch — no hash map lookup. Because identity is tied to the pointer and ID rather than the raw fd number, fd recycling by the OS cannot cause stale-pointer misdirection.
+- **Reference counting (`atomic ref_count`):** Each `Client_Metadata` struct is reference-counted using C11 atomics. The epoll/main track holds one reference; the room holds one reference per member. Workers temporarily increment the count before operating on a target client and decrement after. The struct is `free()`'d only when the count reaches zero — preventing use-after-free across concurrent worker threads.
 
-- The server runs a **single-threaded Level-Triggered `epoll` loop** — no thread-per-client, no locks on the hot path
-- To avoid the classic **fd-recycling (ABA) bug** (where a closed fd is reused and stale pointers misdirect events), each client is assigned a unique `uint16_t client_id` on connect
-- Client and Group metadata are stored in **heap-allocated structs**; the `Client_Metadata*` pointer is stored directly in `epoll_event.data.ptr` for **O(1) dispatch** — no hash map lookup on every event
 
 ### Client: Producer-Consumer Threading
 
-- **Main thread:** `epoll` loop — handles all network reads and state transitions
-- **Secondary thread:** Blocks on `fgets` (stdin), parses commands, encrypts, and sends frames
-- **Graceful shutdown:** `/exit` is intercepted **before encryption** as a local in-band command, triggering a controlled `STATE_DISCONNECTED` transition and sending a `TYPE 3` Leave frame — this avoids the complexity and signal-safety pitfalls of POSIX signal handlers
+- **Consumer (main) thread:** Consumer thread - handles incoming data sent from the Server concurrently.
+- **Producer (secondary) thread:** Producer thread - activates automatic handshake procedure, handling send message through STDIN input and pipe through encrypting workflow before sending.
+- **Condition Variables and Mutexes** are used throughout the structure to ensure serializing when needed to prevent from race cases, while allowing concurrence and parrallel executions to occur.
+- **Encryption and decryption** are only executed in Client-side's code, ensuring data's confidentiality and protect from unwanted interference to the server.
 
 ### Non-blocking I/O & Partial Reads
 
@@ -196,7 +202,7 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 - **Correct TCP handling:** TLV framing eliminates delimiter-based parsing bugs and handles stream fragmentation properly
 - **ABA-safe design:** Unique `client_id` decouples identity from the raw socket fd lifecycle
 - **Minimal trusted surface:** Ephemeral keypairs mean no persistent key material to compromise
-- **Efficient server:** Single-threaded `epoll` scales to many concurrent connections without thread-per-client overhead
+- **Multi-core server (v1.1):** The `epoll` + thread pool design keeps the event loop lean (accept + enqueue only) while worker threads saturate all CPU cores for message processing — context switches are bounded by the physical CPU cores, hence approaches much higher throughput and utilization than v1.0.
 
 ### Cons
 
