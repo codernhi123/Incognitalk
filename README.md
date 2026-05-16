@@ -4,8 +4,9 @@
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
+- [Updates](#-update)
 - [Objective](#-objective)
 - [Tech Stack](#-tech-stack)
 - [Getting Started](#-getting-started)
@@ -16,7 +17,13 @@
 
 ---
 
-## 🎯 Objective
+## Update (v1.1)
+
+*Working on a major update for the server, upgrading from single core E-poll handling to a hybrid Epoll triggering a bounded dynamic set of threadpool for minimizing context-switch and maximizing multi-cores throughput.*
+
+---
+
+## Objective
 
 Build a **group chat system** where:
 - Multiple clients can create or join named rooms over **IPv6 TCP**
@@ -26,7 +33,7 @@ Build a **group chat system** where:
 
 ---
 
-## 🛠 Tech Stack
+## Tech Stack
 
 | Layer | Technology |
 |---|---|
@@ -42,7 +49,7 @@ Build a **group chat system** where:
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -73,12 +80,14 @@ cd build
 ```bash
 ./client <IP> <PORT> <Hoster_Boolean> <GroupID> <log_path>
 # Hoster_Boolean = 1
+# GroupID = [Random integer] since we don't care for hoster's groupID
 ```
 
 **Terminal 3 — Start a joining client:**
 ```bash
 ./client <IP> <PORT> <Hoster_Boolean> <GroupID> <log_path>
 # Hoster_Boolean = 0
+# GroupID = [ID given to the Hoster]
 ```
 
 **In-band commands:**
@@ -88,7 +97,7 @@ cd build
 
 ---
 
-## 🧭 Approach & Design
+## Approach & Design
 
 ### 1. High-Level Architecture
 
@@ -153,7 +162,7 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 
 ---
 
-## 🔧 Implementation Details
+## Implementation Details
 
 ### Server: `epoll` + ABA-Safe Client IDs
 
@@ -179,9 +188,9 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 
 ---
 
-## ⚖️ Pros, Cons & Future Improvements
+## Pros, Cons & Future Improvements
 
-### ✅ Pros
+### Pros
 
 - **True E2EE:** The server routes encrypted blobs — it has zero access to plaintext messages
 - **Correct TCP handling:** TLV framing eliminates delimiter-based parsing bugs and handles stream fragmentation properly
@@ -189,13 +198,13 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 - **Minimal trusted surface:** Ephemeral keypairs mean no persistent key material to compromise
 - **Efficient server:** Single-threaded `epoll` scales to many concurrent connections without thread-per-client overhead
 
-### ❌ Cons
+### Cons
 
 - **No persistent identity / authentication:** Because keypairs are ephemeral, there is no way to verify a returning user is who they claim to be — a malicious server could perform a MITM during the key exchange.
 - **Host has to stay until the end:** For simplicity, my project assumes that Hosting client has to stay in the room until everyone left, this could be fixed by changing Hoster dynamically. 
 - **Host has to endure higher load for larger scale:** Hosting client is responsible for secret key distribution, hence as it scales, hardware of hoster has more task to do.
 
-### 🔭 What Could Be Improved
+### What Could Be Improved
 
 *High Architecture Level:*
 
@@ -210,14 +219,14 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 
 ---
 
-## 📊 Benchmarking
+## Benchmarking
 
-> 🚧 **Coming Soon**
+> **Coming Soon**
 
-Planned stress tests to validate the server's `epoll`-based architecture under load:
+Planned stress tests to validate the server's `epoll`-based architecture under load (Update v1.1):
 
-- **10,000 idle connections** — verify the server holds concurrent connections without fd exhaustion or memory leaks
-- **80,000 messages/sec throughput** — measure end-to-end message relay rate under sustained load, including AES encryption/decryption overhead on the client side
+- **100,000 connections** — verify the server holds concurrent connections without fd exhaustion or memory leaks
+- **200,000 messages/sec throughput** — measure end-to-end message relay rate under sustained load, including AES encryption/decryption overhead on the client side
 
 Results and methodology will be documented here once testing is complete.
 

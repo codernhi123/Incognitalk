@@ -143,6 +143,7 @@ void message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pa
     uint32_t net_group_id = 0;
     memcpy(&net_group_id, payload, sizeof(uint32_t));
     client->group_id = ntohl(net_group_id);
+    printf("Room created successfully! Room ID: %u\n", client->group_id);
     
     pthread_mutex_lock(&state_mutex);
     client->state = STATE_IN_ROOM;
