@@ -19,19 +19,32 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <semaphore.h>
 
 int PORT = 0;
 int BUFF_MAX = 2048;
 int MAX_CLIENTS = 100000; // = #members in a room * #room: to be set in argument 
 int LISTEN_BACKLOG = 0; // to be set in argument
 short CLIENTS_CNT = 0;
+int READ_QUOTA = 8192; // to avoid starvation of clients with large messages, we will only read 8192 bytes from the socket each time, and if there's still leftover bytes then we will read in the next round after processing the current message
 
 struct GroupChat_Metadata glob_groupchats[100]; // server keeps track of all rooms
+pthread_t pthread_id[64];
 short GLOB_GROUPCHAT_CNT = 0;
+pthread_mutex_t glob_groupchats_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+sem_t task_sem;
+struct Client_Metadata *task_circular_queue[100000]; // for worker threads to get the waiting client to process, CS hence protected by a mutex
+int queue_front = 0;
+int queue_rear = 0;
+int queue_size = 0;
+pthread_mutex_t task_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+int epoll_fd = -1;
 
 int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS> 
 {
-  // setting up TCP pipeline for server with IPv6 communication
+  int NUM_THREADS = sysconf(_SC_NPROCESSORS_ONLN);
+  // --- setting up TCP pipeline for server with IPv6 communication
   if (argc != 3) {
     error_handle("CLI argument for server issue");
   }
@@ -66,7 +79,7 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
     error_handle("listen issue");
   }
 
-  int epoll_fd;
+  // --- setting up epoll
   int nfds = 0;
   struct epoll_event ev, events[MAX_CLIENTS];
 
@@ -78,6 +91,14 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
   ev.data.fd = s_fd;
   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, s_fd, &ev) == -1) {
     error_handle("epoll_ctl: listen_sock issue");
+  }
+
+  // --- setting up threadpool
+  sem_init(&task_sem, 0, 0);
+  for (int i = 0; i < NUM_THREADS; i++) {
+    if (pthread_create(&pthread_id[i], NULL, (void *)message_handler, NULL) != 0) {
+      error_handle("pthread_create issue");
+    }
   }
 
   for (;;) {
@@ -103,7 +124,7 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
           free(newclient);
           error_handle("accept issue");
         }
-        ev.events = EPOLLIN;
+        ev.events = EPOLLIN | EPOLLONESHOT; // use EPOLLONESHOT to avoid multiple threads handling the same client concurrently, we will reset it after processing the client's message in the worker thread
         ev.data.ptr = newclient;
         if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, newclient->fd, &ev) == -1) {
           perror("epoll_cntl: conn_sock");
@@ -116,12 +137,25 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
         newclient->room = NULL;
         newclient->state = STATE_JUST_CONNECTED;
         newclient->client_id = CLIENTS_CNT++;
+        pthread_mutex_init(&newclient->client_mutex, NULL);
+        atomic_init(&newclient->ref_count, 1); // 1 reference owned by the epoll/main track
         memset(newclient->recv_buf, 0, sizeof(char) * BUFF_MAX);
         newclient->leftover_bytes = 0;
       } else {
         // --- extract and handling message
         struct Client_Metadata *client = (struct Client_Metadata *)events[i].data.ptr;
-        message_handler((struct Client_Metadata *)client);
+        // ... add the client into task queue and wake up worker thread to process the message, the worker thread will take care of the state transition and response message construction/sending
+        pthread_mutex_lock(&task_queue_mutex);
+        if (queue_size == 100000) {
+          pthread_mutex_unlock(&task_queue_mutex);
+          error_handle("Task queue overflow, too many clients to handle");
+        }
+        task_circular_queue[queue_rear] = client;
+        queue_rear = (queue_rear + 1) % 100000;
+        queue_size++;
+        pthread_mutex_unlock(&task_queue_mutex);
+        sem_post(&task_sem);
+        // same as: message_handler((struct Client_Metadata *)client); like v1.0
       }
     }
   }
