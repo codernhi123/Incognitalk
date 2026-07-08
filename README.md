@@ -227,14 +227,46 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 
 ## Benchmarking
 
-> **Coming Soon**
+`src/benchmark.c` is an automated stress-test harness: it forks a server, a host, and X non-host clients, all of whom join the same room, run the full E2EE handshake, send a synchronized burst of messages, then leave — reporting the peak number of clients the server held concurrently.
 
-Planned stress tests to validate the server's `epoll`-based architecture under load (Update v1.1):
+```bash
+cd build
+./benchmark <num_non_hosters> <server_port>
 
-- **100,000 connections** — verify the server holds concurrent connections without fd exhaustion or memory leaks
-- **200,000 messages/sec throughput** — measure end-to-end message relay rate under sustained load, including AES encryption/decryption overhead on the client side
+# Example: 50 concurrent clients
+./benchmark 50 9999
+```
 
-Results and methodology will be documented here once testing is complete.
+### Result: 1,024 concurrent clients
+
+*Tested on an Intel Xeon W-11955M (8C/16T), 64 GB DDR4, Ubuntu on WSL 2*
+
+<img src="./img/BenchMark_001_hardware.png" width="100%"/>
+
+| Phase | What happens | Time | Bottleneck |
+|---|---|---:|---|
+| **Key distribution** | 1,024 clients each generate an RSA-2048 keypair, join, and complete the handshake | ~30s | CPU-bound on RSA keygen (harness-side) |
+| **Message burst** | All 1,024 clients send + leave simultaneously | <1s | Server absorbed it — never the bottleneck |
+
+**Key insight:** the limiting factor is RSA-2048 key generation in the *test harness*, not the server. Swapping to ECC (P-256) for the handshake would cut keygen time ~100×, making realistic 30K+ client load tests practical.
+
+### Headroom
+
+The architecture supports **20,000 concurrent connections with zero code changes** — `client_id` (16-bit), the 100K-capacity task queue, and per-client memory (~2 KB) all sit well under their limits. Scaling past 50K only needs two integer types widened to 32-bit (`CLIENTS_CNT`, `client_id`).
+
+The actual scaling limit is **single-room broadcast fan-out** (one `write()` per room member per message), not connection count — many small rooms scale far better than one giant room.
+
+### Tuning for 10K+ clients
+
+```bash
+ulimit -n 65536                                              # raise open-fd limit
+sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"     # widen ephemeral port range
+sudo sysctl -w net.ipv4.tcp_tw_reuse=1                       # faster TCP recycling
+sudo sysctl -w kernel.threads-max=100000                     # allow more OS threads
+sudo sysctl -w vm.max_map_count=65536
+```
+
+The benchmark uses pthreads (not processes) with a 256 KB stack per thread — ~7.7 GB total at 30K threads, versus 240 GB at the 8 MB default stack size.
 
 ---
 
