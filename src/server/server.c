@@ -33,6 +33,9 @@ pthread_t pthread_id[64];
 short GLOB_GROUPCHAT_CNT = 0;
 pthread_mutex_t glob_groupchats_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+atomic_int concurrent_clients = 0;
+atomic_int peak_concurrent_clients = 0;
+
 sem_t task_sem;
 struct Client_Metadata *task_circular_queue[100000]; // for worker threads to get the waiting client to process, CS hence protected by a mutex
 int queue_front = 0;

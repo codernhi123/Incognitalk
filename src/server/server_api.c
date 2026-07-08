@@ -115,13 +115,17 @@ void *message_handler(void *arg) {
         disconnected = 1;
         break;
       } else if (num_read == -1) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ECONNRESET) {
           close(c_fd);
           if (atomic_fetch_sub(&client->ref_count, 1) == 1) {
             pthread_mutex_destroy(&client->client_mutex);
             free(client);
           }
           error_handle("read issue");
+        }
+        if (errno == ECONNRESET) {
+          /* peer closed unexpectedly – handle same as EOF */
+          disconnected = 1;
         }
         break;
       }
@@ -150,6 +154,10 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
       struct GroupChat_Metadata *new_room = (struct GroupChat_Metadata *)(glob_groupchats + assigned_groupID);
       new_room->id = assigned_groupID;
       new_room->is_active = 1;
+      new_room->members_cap = 128;
+      new_room->members = malloc(sizeof(struct Client_Metadata *) * new_room->members_cap);
+      if (!new_room->members) error_handle("malloc room members");
+      new_room->member_count = 0;
       pthread_mutex_init(&new_room->room_mutex, NULL);
       GLOB_GROUPCHAT_CNT++;
 
@@ -157,6 +165,13 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
 
       client->is_hoster = 1;
       client->state = STATE_IN_ROOM;
+      {
+        int cur = atomic_fetch_add(&concurrent_clients, 1) + 1;
+        int peak = atomic_load(&peak_concurrent_clients);
+        while (cur > peak) {
+          if (atomic_compare_exchange_weak(&peak_concurrent_clients, &peak, cur)) break;
+        }
+      }
       client->room = new_room;
       client->groupchat_id = assigned_groupID;
       client->room_idx = 0;
@@ -198,6 +213,15 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
         free(client);
         perror("Invalid groupchat_id in type 0 message");
         exit(EXIT_FAILURE);
+      }
+      /* grow members array if needed */
+      if (client->room->member_count >= client->room->members_cap) {
+        int new_cap = client->room->members_cap * 2;
+        struct Client_Metadata **tmp = realloc(client->room->members,
+           sizeof(struct Client_Metadata *) * new_cap);
+        if (!tmp) error_handle("realloc room members");
+        client->room->members = tmp;
+        client->room->members_cap = new_cap;
       }
       client->room->members[client->room->member_count] = client;
       client->room_idx = client->room->member_count;
@@ -300,14 +324,22 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
         room->member_count--;
         client->state = STATE_DISCONNECTED;
         atomic_fetch_sub(&client->ref_count, 1); // release room's reference
+        atomic_fetch_sub(&concurrent_clients, 1);
       } else {
+        if (client->groupchat_id == 0) {
+          int peak = atomic_load(&peak_concurrent_clients);
+          fprintf(stderr, "\n[BENCHMARK] Peak concurrent clients in room 0: %d\n", peak);
+        }
         room->is_active = 0;
         for (int i = 0; i < room->member_count; i++) {
-          if (room->members[i]->state == STATE_IN_ROOM) {
+          if (room->members[i] != NULL && room->members[i]->state == STATE_IN_ROOM) {
             room->members[i]->state = STATE_DISCONNECTED;
-            atomic_fetch_sub(&room->members[i]->ref_count, 1); // release room's reference for all members
+            atomic_fetch_sub(&room->members[i]->ref_count, 1);
           }
         }
+        atomic_fetch_sub(&concurrent_clients, room->member_count);
+        free(room->members);
+        room->members = NULL;
       }
       close(client->fd);
       pthread_mutex_unlock(&client->room->room_mutex);
@@ -337,6 +369,13 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
         exit(EXIT_FAILURE);
       }
       new_client->state = STATE_IN_ROOM;
+      {
+        int cur = atomic_fetch_add(&concurrent_clients, 1) + 1;
+        int peak = atomic_load(&peak_concurrent_clients);
+        while (cur > peak) {
+          if (atomic_compare_exchange_weak(&peak_concurrent_clients, &peak, cur)) break;
+        }
+      }
       uint8_t forward_buf[2048] = {0};
       forward_buf[0] = (uint8_t)2;
       uint16_t net_len = htons(payload_len - 2);

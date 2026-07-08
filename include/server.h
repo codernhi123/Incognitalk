@@ -37,6 +37,9 @@ extern int READ_QUOTA;
 extern short GLOB_GROUPCHAT_CNT;
 extern int epoll_fd;
 
+extern atomic_int concurrent_clients;
+extern atomic_int peak_concurrent_clients;
+
 extern sem_t task_sem;
 extern struct Client_Metadata *task_circular_queue[100000];
 extern int queue_front;
@@ -74,7 +77,8 @@ struct GroupChat_Metadata {
   uint32_t id;              // the 5-digit chat ID
   int is_active;        // 0 if groupchat ended, 1 if active
   struct Client_Metadata *host; // the first client that created the room, responsible for key sharing
-  struct Client_Metadata *members[1000]; // array (or linked list) of clients in this room
+  struct Client_Metadata **members; // dynamic array for scalability (up to 35 000)
+  int members_cap;                 // current allocation capacity
   int member_count;
 
   pthread_mutex_t room_mutex; // to protect the members array and member_count when adding/removing members, and also protect the is_active flag when host leaves and end the room
