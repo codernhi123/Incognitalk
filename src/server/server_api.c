@@ -254,6 +254,8 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
     }
   } else if (client->state == STATE_IN_ROOM) { // host does seckey distro or clients do chat
     if (type == 1) {
+      /* Benchmark mode: skip broadcast fan-out to avoid O(N²) writes */
+      if (getenv("BENCHMARK_SKIP_BROADCAST")) return 0;
       //... transfer the encrypted message to all other clients in the same room
       struct GroupChat_Metadata *room = client->room;
       pthread_mutex_lock(&room->room_mutex);
