@@ -228,15 +228,18 @@ static int connect_server(const char *ip_str, int port) {
 static void run_host(const char *ip, int port) {
   int fd = connect_server(ip, port);
 
-  /* keypair from pre-baked string literal — no runtime keygen */
-  RSA_Keypair kp;
-  memset(&kp, 0, sizeof(kp));
-  memcpy(kp.private_key_pem, PRE_HOST_PRIVKEY, strlen(PRE_HOST_PRIVKEY));
-  memcpy(kp.public_key_pem, PRE_HOST_PUBKEY, strlen(PRE_HOST_PUBKEY));
-  int pubkey_len = (int)strlen(kp.public_key_pem);
+  int nocrypto = getenv("BENCHMARK_NO_CRYPTO") != NULL;
 
+  RSA_Keypair kp;
+  int pubkey_len = 0;
   unsigned char shared_key[2048];
-  memcpy(shared_key, PRE_AES_KEY, 32);
+  if (!nocrypto) {
+    memset(&kp, 0, sizeof(kp));
+    memcpy(kp.private_key_pem, PRE_HOST_PRIVKEY, strlen(PRE_HOST_PRIVKEY));
+    memcpy(kp.public_key_pem, PRE_HOST_PUBKEY, strlen(PRE_HOST_PUBKEY));
+    pubkey_len = (int)strlen(kp.public_key_pem);
+    memcpy(shared_key, PRE_AES_KEY, 32);
+  }
 
   send_msg(fd, 4, NULL, 0); /* create room */
 
@@ -251,39 +254,44 @@ static void run_host(const char *ip, int port) {
     if (plen < 0) break;
 
     if (type == 0) {
-      uint16_t cid;
-      memcpy(&cid, buf, 2);
-      cid = ntohs(cid);
-      int pkey_len = plen - 2;
+      if (nocrypto) {
+        /* no-crypto: server already promoted client to IN_ROOM.
+           Just count the joiner — no key exchange needed. */
+        non_hosters++;
+      } else {
+        uint16_t cid;
+        memcpy(&cid, buf, 2);
+        cid = ntohs(cid);
+        int pkey_len = plen - 2;
 
-      char peer_pubkey[2048] = {0};
-      if (pkey_len > (int)sizeof(peer_pubkey) - 1)
-        error_handle("peer pubkey too large");
-      memcpy(peer_pubkey, buf + 2, pkey_len);
-      non_hosters++;
+        char peer_pubkey[2048] = {0};
+        if (pkey_len > (int)sizeof(peer_pubkey) - 1)
+          error_handle("peer pubkey too large");
+        memcpy(peer_pubkey, buf + 2, pkey_len);
+        non_hosters++;
 
-      unsigned char enc_key[256];
-      size_t ek_len = sizeof(enc_key);
-      if (rsa_encrypt_with_public_key(peer_pubkey, shared_key, AES_KEY_LEN,
-                                      enc_key, &ek_len) < 0)
-        error_handle("host rsa_encrypt");
+        unsigned char enc_key[256];
+        size_t ek_len = sizeof(enc_key);
+        if (rsa_encrypt_with_public_key(peer_pubkey, shared_key, AES_KEY_LEN,
+                                        enc_key, &ek_len) < 0)
+          error_handle("host rsa_encrypt");
 
-      unsigned char sig[256];
-      size_t sig_len = sizeof(sig);
-      if (rsa_sign_with_private_key(kp.private_key_pem, enc_key, ek_len,
-                                    sig, &sig_len) < 0)
-        error_handle("host rsa_sign");
+        unsigned char sig[256];
+        size_t sig_len = sizeof(sig);
+        if (rsa_sign_with_private_key(kp.private_key_pem, enc_key, ek_len,
+                                      sig, &sig_len) < 0)
+          error_handle("host rsa_sign");
 
-      uint8_t p2[4096];
-      uint16_t nc = htons(cid);
-      memcpy(p2, &nc, 2);
-      memcpy(p2 + 2, kp.public_key_pem, pubkey_len);
-      memcpy(p2 + 2 + pubkey_len, enc_key, ek_len);
-      memcpy(p2 + 2 + pubkey_len + ek_len, sig, sig_len);
-      uint16_t p2len = 2 + (uint16_t)pubkey_len + (uint16_t)ek_len +
-                       (uint16_t)sig_len;
-      send_msg(fd, 2, p2, p2len);
-
+        uint8_t p2[4096];
+        uint16_t nc = htons(cid);
+        memcpy(p2, &nc, 2);
+        memcpy(p2 + 2, kp.public_key_pem, pubkey_len);
+        memcpy(p2 + 2 + pubkey_len, enc_key, ek_len);
+        memcpy(p2 + 2 + pubkey_len + ek_len, sig, sig_len);
+        uint16_t p2len = 2 + (uint16_t)pubkey_len + (uint16_t)ek_len +
+                         (uint16_t)sig_len;
+        send_msg(fd, 2, p2, p2len);
+      }
     } else if (type == 3) {
       non_hosters--;
       if (non_hosters == 0) {
@@ -314,7 +322,34 @@ static void *run_nonhoster_thread(void *arg) {
   struct nh_args *a = (struct nh_args *)arg;
   int fd = connect_server(a->ip, a->port);
 
-  /* keypair from pre-baked string literal — no runtime keygen */
+  int nocrypto = getenv("BENCHMARK_NO_CRYPTO") != NULL;
+
+  if (nocrypto) {
+    /* No-crypto mode: minimal join (just group_id), server auto-promotes */
+    uint8_t join[4096];
+    uint32_t ng = htonl(a->gid);
+    memcpy(join, &ng, 4);
+    if (send_msg(fd, 0, join, 4) < 0) {
+      close(fd); return (void *)(intptr_t)-1;
+    }
+
+    /* Server already set STATE_IN_ROOM — no type 2 to wait for */
+    __sync_fetch_and_add(&a->bar->ready_count, 1);
+    while (!__atomic_load_n(&a->bar->go_flag, __ATOMIC_ACQUIRE))
+      usleep(1000);
+
+    /* Send plaintext "Hello world" (no encryption) */
+    const char *pt = "Hello world";
+    send_msg(fd, 1, (const uint8_t *)pt, (uint16_t)strlen(pt));
+
+    send_msg(fd, 3, NULL, 0);
+    shutdown(fd, SHUT_WR);
+    { uint8_t d[64]; while (read(fd, d, sizeof(d)) > 0) {} }
+    close(fd);
+    return NULL;
+  }
+
+  /* --- crypto mode below (unchanged) --- */
   RSA_Keypair kp;
   memset(&kp, 0, sizeof(kp));
   memcpy(kp.private_key_pem, PRE_PEER_PRIVKEY, strlen(PRE_PEER_PRIVKEY));
@@ -404,8 +439,9 @@ int main(int argc, char *argv[]) {
   signal(SIGPIPE, SIG_IGN);
   signal(SIGCHLD, SIG_DFL);
 
-  /* Set env var so server skips O(N²) broadcast fan-out (benchmark only) */
+  /* Set env vars so server skips O(N²) broadcast and crypto handshake */
   setenv("BENCHMARK_SKIP_BROADCAST", "1", 1);
+  setenv("BENCHMARK_NO_CRYPTO", "1", 1);
 
   /* Raise TCP listen backlog to prevent SYN drops at scale */
   system("sysctl -w net.core.somaxconn=65536 2>/dev/null");
