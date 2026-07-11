@@ -21,4 +21,5 @@ find_package(OpenSSL REQUIRED)
 target_link_libraries(client OpenSSL::Crypto)
 target_link_libraries(benchmark OpenSSL::Crypto)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -g")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O2")
+# Uncomment for ASAN debugging: set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -g")

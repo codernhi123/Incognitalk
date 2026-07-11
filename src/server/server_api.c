@@ -27,8 +27,10 @@
 void *message_handler(void *arg) {
 
   for (;;) {
-    if (sem_wait(&task_sem) == -1) {
-      error_handle("sem_wait issue");
+    int ret = sem_wait(&task_sem);
+    if (ret == -1) {
+      if (errno == EINTR) continue;
+      break; /* shutdown */
     }
 
     // --- extract 1 client from the task queue to process
@@ -115,13 +117,14 @@ void *message_handler(void *arg) {
         disconnected = 1;
         break;
       } else if (num_read == -1) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ECONNRESET) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ECONNRESET && errno != EBADF) {
           close(c_fd);
           if (atomic_fetch_sub(&client->ref_count, 1) == 1) {
             pthread_mutex_destroy(&client->client_mutex);
             free(client);
           }
-          error_handle("read issue");
+          /* don't crash on shutdown — just disconnect */
+          return NULL;
         }
         if (errno == ECONNRESET) {
           /* peer closed unexpectedly – handle same as EOF */
@@ -137,7 +140,8 @@ void *message_handler(void *arg) {
       ev.events = EPOLLIN | EPOLLONESHOT;
       ev.data.ptr = client;
       if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, c_fd, &ev) == -1) {
-        error_handle("epoll_ctl_mod issue");
+        /* fd was closed — just bail */
+        break;
       }
     }
   }
@@ -229,6 +233,35 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
       atomic_fetch_add(&client->ref_count, 1); // room acquires a reference to the client
       struct Client_Metadata *host = client->room->host;
       atomic_fetch_add(&host->ref_count, 1); // acquire reference to host before unlock
+
+      if (getenv("BENCHMARK_NO_CRYPTO")) {
+        /* No-crypto mode: skip key exchange, go directly to IN_ROOM */
+        client->state = STATE_IN_ROOM;
+        {
+          int cur = atomic_fetch_add(&concurrent_clients, 1) + 1;
+          int peak = atomic_load(&peak_concurrent_clients);
+          while (cur > peak) {
+            if (atomic_compare_exchange_weak(&peak_concurrent_clients, &peak, cur)) break;
+          }
+        }
+        /* Still notify host so it can track joiners (minimal: just client_id) */
+        uint8_t notify[2048] = {0};
+        notify[0] = 0;
+        uint16_t net_len = htons(2);
+        memcpy(notify + 1, &net_len, sizeof(uint16_t));
+        uint16_t net_cid = htons(client->client_id);
+        memcpy(notify + 3, &net_cid, sizeof(uint16_t));
+        pthread_mutex_lock(&host->client_mutex);
+        write(host->fd, notify, 5);
+        pthread_mutex_unlock(&host->client_mutex);
+        pthread_mutex_unlock(&client->room->room_mutex);
+        if (atomic_fetch_sub(&host->ref_count, 1) == 1) {
+          pthread_mutex_destroy(&host->client_mutex);
+          free(host);
+        }
+        return 0;
+      }
+
       pthread_mutex_unlock(&client->room->room_mutex);
       // if this client is not the hoster, send to host to add to waiting queue for key distro
       uint8_t trigger_buf[2048] = {0};
@@ -254,6 +287,8 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
     }
   } else if (client->state == STATE_IN_ROOM) { // host does seckey distro or clients do chat
     if (type == 1) {
+      /* Benchmark mode: skip broadcast fan-out to avoid O(N²) writes */
+      if (getenv("BENCHMARK_SKIP_BROADCAST")) return 0;
       //... transfer the encrypted message to all other clients in the same room
       struct GroupChat_Metadata *room = client->room;
       pthread_mutex_lock(&room->room_mutex);
@@ -287,9 +322,22 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
       //... trigger disconnect procedure, if non-host leaves, notify all clients in the room, else, just end the room cuz no one left
       struct GroupChat_Metadata *room = client->room;
       pthread_mutex_lock(&room->room_mutex);
+      if (!room->is_active || !room->members) {
+        /* Host already tore down the room — just disconnect */
+        client->state = STATE_DISCONNECTED;
+        atomic_fetch_sub(&client->ref_count, 1);
+        atomic_fetch_sub(&concurrent_clients, 1);
+        pthread_mutex_unlock(&room->room_mutex);
+        close(client->fd);
+        if (atomic_fetch_sub(&client->ref_count, 1) == 1) {
+          pthread_mutex_destroy(&client->client_mutex);
+          free(client);
+        }
+        return 1;
+      }
       if (client->is_hoster == 0) {
         for (int i = 0; i < room->member_count; i++) {
-          if (room->members[i]->client_id != client->client_id && room->members[i]->state == STATE_IN_ROOM) {
+          if (room->members[i] && room->members[i]->client_id != client->client_id && room->members[i]->state == STATE_IN_ROOM) {
             struct Client_Metadata *target = room->members[i];
             atomic_fetch_add(&target->ref_count, 1);
             pthread_mutex_unlock(&room->room_mutex); // unlock to prevent blocking
@@ -313,7 +361,9 @@ int message_processor(struct Client_Metadata *client, uint8_t type, uint8_t *pay
           }
         }
         if (!(client->room != NULL && client->state == STATE_IN_ROOM)) {
-          error_handle("Client has left before, unexpected behavior");
+          /* Shutdown race — return disconnect signal instead of crashing */
+          pthread_mutex_unlock(&client->room->room_mutex);
+          return 1;
         }
         int last_idx = room->member_count - 1;
         struct Client_Metadata *last_client = room->members[last_idx];

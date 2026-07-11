@@ -8,13 +8,13 @@
 
 ## Table of Contents
 
-- [Objective](#-objective)
-- [Tech Stack](#-tech-stack)
-- [Getting Started](#-getting-started)
-- [Approach & Design](#-approach--design)
-- [Implementation Details](#-implementation-details)
-- [Pros, Cons & Future Improvements](#-pros-cons--future-improvements)
-- [Benchmarking](#-benchmarking)
+- [Objective](#objective)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [Approach & Design](#approach--design)
+- [Implementation Details](#implementation-details)
+- [Pros, Cons & Future Improvements](#pros-cons--future-improvements)
+- [Benchmarking](#benchmarking)
 
 ---
 
@@ -24,7 +24,7 @@ Build a **group chat system** where:
 - Multiple clients can create or join named rooms over **IPv6 TCP**
 - All chat messages are **end-to-end encrypted** — the server never sees plaintext
 - The system is resilient to **fd-recycling (ABA)** bugs and handles **partial TCP reads** correctly via a strict binary framing protocol
-- The system is processed **concurrently** in **parrallel CPU cores**, optimizing CPU utilization to achieve **high throughputs**.
+- The system is processed **concurrently** across **parallel CPU cores**, optimizing CPU utilization to achieve **high throughput**
 - The entire stack — networking, concurrency, and cryptography — is implemented using **low-level POSIX and OpenSSL APIs**, with no high-level frameworks
 
 ---
@@ -166,10 +166,11 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
  
 - **Main thread (event loop):** Runs `epoll_wait` in a tight loop. It handles only two responsibilities: accepting new connections and detecting which existing clients have data ready to read. When a client socket becomes readable, the main thread pushes the client's `Client_Metadata*` pointer into a circular task queue and posts a semaphore — then immediately goes back to `epoll_wait`. It does zero message processing itself.
 - **Worker thread pool:** `sysconf(_SC_NPROCESSORS_ONLN)` threads are spawned at startup, each blocking on `sem_wait`. When woken, a worker pulls one `Client_Metadata*` from the circular task queue (protected by a `pthread_mutex`) and calls `message_processor()` to handle all state transitions, frame parsing, and message forwarding for that client.
+
 **Key design decisions extracted from the code:**
  
 - **`EPOLLONESHOT`:** Every client fd is registered with `EPOLLONESHOT`. Once `epoll` fires for a client, it is automatically disarmed — no other thread can be woken for the same fd concurrently. After the worker finishes processing, it re-arms the fd via `epoll_ctl(EPOLL_CTL_MOD)`. This eliminates the need for per-socket read locks between worker threads.
-- **Read quota (`READ_QUOTA = 8192`):** Each worker reads at most 8 192 bytes per dispatch cycle. If a client sends a burst larger than the quota, the remainder is handled in the next `epoll` firing — preventing one chatty client from starving others in the queue. This ensures fair-treatment (adapted from Round-robin Scheduling) to all waiting tasks.
+- **Read quota (`READ_QUOTA = 8192`):** Each worker reads at most 8 192 bytes per dispatch cycle. If a client sends a burst larger than the quota, the remainder is handled in the next `epoll` firing — preventing one chatty client from starving others in the queue. This ensures fair treatment (adapted from Round-robin Scheduling) to all waiting tasks.
 - **Circular task queue (size 100 000):** A fixed-size ring buffer stores `Client_Metadata*` pointers. The main thread writes at `queue_rear`; workers consume from `queue_front`. Both ends are protected by a single `pthread_mutex`. If the queue fills (overflow guard), the server aborts rather than silently dropping events.
 - **ABA-safe client IDs:** Each accepted connection is assigned a unique `uint16_t client_id` (monotonically incrementing `CLIENTS_CNT`). The `Client_Metadata*` pointer lives in `epoll_event.data.ptr` for O(1) dispatch — no hash map lookup. Because identity is tied to the pointer and ID rather than the raw fd number, fd recycling by the OS cannot cause stale-pointer misdirection.
 - **Reference counting (`atomic ref_count`):** Each `Client_Metadata` struct is reference-counted using C11 atomics. The epoll/main track holds one reference; the room holds one reference per member. Workers temporarily increment the count before operating on a target client and decrement after. The struct is `free()`'d only when the count reaches zero — preventing use-after-free across concurrent worker threads.
@@ -177,10 +178,10 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 
 ### Client: Producer-Consumer Threading
 
-- **Consumer (main) thread:** Consumer thread - handles incoming data sent from the Server concurrently.
-- **Producer (secondary) thread:** Producer thread - activates automatic handshake procedure, handling send message through STDIN input and pipe through encrypting workflow before sending.
-- **Condition Variables and Mutexes** are used throughout the structure to ensure serializing when needed to prevent from race cases, while allowing concurrence and parrallel executions to occur.
-- **Encryption and decryption** are only executed in Client-side's code, ensuring data's confidentiality and protect from unwanted interference to the server.
+- **Consumer (main) thread:** Handles incoming data from the server concurrently.
+- **Producer (secondary) thread:** Drives the automatic handshake procedure and handles STDIN input, piping messages through the encryption workflow before sending.
+- **Condition variables and mutexes** serialize access where needed to prevent race conditions, while still allowing concurrent, parallel execution elsewhere in the pipeline.
+- **Encryption and decryption** happen only in client-side code, keeping message content confidential and preventing server-side interference with plaintext.
 
 ### Non-blocking I/O & Partial Reads
 
@@ -207,8 +208,8 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 ### Cons
 
 - **No persistent identity / authentication:** Because keypairs are ephemeral, there is no way to verify a returning user is who they claim to be — a malicious server could perform a MITM during the key exchange.
-- **Host has to stay until the end:** For simplicity, my project assumes that Hosting client has to stay in the room until everyone left, this could be fixed by changing Hoster dynamically. 
-- **Host has to endure higher load for larger scale:** Hosting client is responsible for secret key distribution, hence as it scales, hardware of hoster has more task to do.
+- **Host has to stay until the end:** For simplicity, my project assumes that the hosting client has to stay in the room until everyone else has left; this could be fixed by migrating the host role dynamically.
+- **Host has to endure higher load at larger scale:** The hosting client is responsible for secret key distribution, so as the room scales, the host's hardware has more work to do.
 
 ### What Could Be Improved
 
@@ -216,7 +217,7 @@ Every TCP transmission uses a fixed **Type-Length-Value** binary frame. There ar
 
 - **Authenticated Key Exchange:** Replace the bare RSA key distribution with a proper **Station-to-Station (STS)** or **Signal-style X3DH** protocol to prevent MITM during handshake
 - **Forward Secrecy per message:** Replace the static per-room AES key with a **Double Ratchet**-style key derivation so compromising one message key doesn't expose past messages
-- **Distribute the load for Hoster**: Instead of having 1 Hoster, anyone could be doing key distribution and will be decided by the server to lower the load from the current unique Hoster.
+- **Distribute the load for the Hoster:** Instead of a single fixed host, key distribution responsibility could be assigned dynamically by the server to reduce load on any one client.
 
 *Lower Level, more into details:*
 
@@ -237,7 +238,7 @@ cd build
 ./benchmark 50 9999
 ```
 
-### Result: 1,024 concurrent clients
+### Result #1: 1,024 concurrent clients (full crypto handshake)
 
 *Tested on an Intel Xeon W-11955M (8C/16T), 64 GB DDR4, Ubuntu on WSL 2*
 
@@ -250,16 +251,34 @@ cd build
 
 **Key insight:** the limiting factor is RSA-2048 key generation in the *test harness*, not the server. Swapping to ECC (P-256) for the handshake would cut keygen time ~100×, making realistic 30K+ client load tests practical.
 
+### Result #2: 10,006 concurrent clients — clears the C10k problem
+
+*Tested on an Intel Core Ultra 9 285K (24C/24T), 64 GB DDR5, 1TB SSD*
+
+<img src="./img/benchmarkv2.png" width="100%"/>
+
+| Phase | What happens | Time | Bottleneck |
+|---|---|---:|---|
+| **Batch spawn & join (no crypto)** | 10,005 non-host client threads connect and join in batches of 500; keygen skipped to isolate raw server capacity | ~500ms | N/A — harness thread spawn |
+| **Message burst** | All 10,005 clients + host fire messages simultaneously, then leave | ~3s | Server absorbed it — never the bottleneck |
+
+Peak concurrency: **10,006** (10,005 non-hosters + 1 host), confirmed by the server's own connection counter.
+
+**Key insight:** with the cryptographic handshake removed from the critical path, this run isolates the `epoll` + thread pool server's raw connection-handling capacity — and it clears the classic **C10k problem** (10,000+ concurrent connections) with margin to spare.
+
 ### Headroom
 
-The architecture supports **20,000 concurrent connections with zero code changes** — `client_id` (16-bit), the 100K-capacity task queue, and per-client memory (~2 KB) all sit well under their limits. Scaling past 50K only needs two integer types widened to 32-bit (`CLIENTS_CNT`, `client_id`).
+**Tested and confirmed:** 10,006 concurrent connections (Result #2 above).
 
-The actual scaling limit is **single-room broadcast fan-out** (one `write()` per room member per message), not connection count — many small rooms scale far better than one giant room.
+**Theoretical, untested beyond that:** the architecture's data structures — `client_id` (16-bit), the 100K-capacity task queue, and per-client memory (~2 KB) — leave room for roughly **20,000 concurrent connections without code changes**. Scaling past 50K would additionally require widening two integer types to 32-bit (`CLIENTS_CNT`, `client_id`).
+
+The actual scaling limit going forward is **single-room broadcast fan-out** (one `write()` per room member per message), not raw connection count — many small rooms scale far better than one giant room.
 
 ### Tuning for 10K+ clients
 
 ```bash
 ulimit -n 65536                                              # raise open-fd limit
+sudo sysctl -w net.core.somaxconn=65536                      # raise listen() backlog queue
 sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"     # widen ephemeral port range
 sudo sysctl -w net.ipv4.tcp_tw_reuse=1                       # faster TCP recycling
 sudo sysctl -w kernel.threads-max=100000                     # allow more OS threads

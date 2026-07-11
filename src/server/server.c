@@ -20,6 +20,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <semaphore.h>
+#include <errno.h>
+#include <signal.h>
 
 int PORT = 0;
 int BUFF_MAX = 2048;
@@ -44,9 +46,17 @@ int queue_size = 0;
 pthread_mutex_t task_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 int epoll_fd = -1;
 
+static volatile sig_atomic_t g_shutdown = 0;
+
+static void handle_sigterm(int sig) { (void)sig; g_shutdown = 1; }
+
 int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS> 
 {
   int NUM_THREADS = sysconf(_SC_NPROCESSORS_ONLN);
+  signal(SIGTERM, handle_sigterm);
+  signal(SIGINT, handle_sigterm);
+  signal(SIGPIPE, SIG_IGN);
+
   // --- setting up TCP pipeline for server with IPv6 communication
   if (argc != 3) {
     error_handle("CLI argument for server issue");
@@ -105,10 +115,15 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
   }
 
   for (;;) {
-    nfds = epoll_wait(epoll_fd, events, MAX_CLIENTS, -1);
+    nfds = epoll_wait(epoll_fd, events, MAX_CLIENTS, 1000); /* 1s timeout for graceful shutdown */
     if (nfds == -1) {
+      if (errno == EINTR) {
+        if (g_shutdown) break;
+        continue;
+      }
       error_handle("epoll_wait issue");
     }
+
     for (int i = 0; i < nfds; i++)
     {
       if (events[i].data.fd == s_fd) {
@@ -118,21 +133,25 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
         newclient->fd = accept(s_fd, (struct sockaddr *)&newclient->addr, &addr_len);
         if (newclient->fd == -1) {
           free(newclient);
-          error_handle("accept issue");
+          if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+          perror("accept"); /* log and continue, don't crash */
+          continue;
         }
         // set O_NONBLOCK & add newcomer's fd into epoll
         int flags = fcntl(newclient->fd, F_GETFL, 0);
         flags |= O_NONBLOCK;
         if (fcntl(newclient->fd, F_SETFL, flags) == -1) {
+          close(newclient->fd);
           free(newclient);
-          error_handle("accept issue");
+          continue;
         }
         ev.events = EPOLLIN | EPOLLONESHOT; // use EPOLLONESHOT to avoid multiple threads handling the same client concurrently, we will reset it after processing the client's message in the worker thread
         ev.data.ptr = newclient;
         if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, newclient->fd, &ev) == -1) {
-          perror("epoll_cntl: conn_sock");
+          perror("epoll_ctl: conn_sock");
+          close(newclient->fd);
           free(newclient);
-          exit(EXIT_FAILURE);
+          continue;
         }
 
         // initate newcomer's other attributes, NO KEY SHARING YET, only when send the first message
@@ -163,6 +182,8 @@ int main(int argc, char *argv[]) // ./server <port> <MAX_CLIENTS>
     }
   }
   //..clean up
+  fprintf(stderr, "[server] shutting down cleanly\n");
   close(s_fd);
+  close(epoll_fd);
   return 0;
 }
